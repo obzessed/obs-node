@@ -1,0 +1,10 @@
+{
+    "libnode": {
+        "version": "24.10.0",
+        "baseUrl": "https://github.com/metacall/libnode/releases/download",
+        "label": "Node.js Shared Library (libnode)",
+        "hashes": {
+            "windows-x64": "930a3b8e0ed433239e44b92ff5b8f05f64f33c932173fd53e26e38300f7a5e2a"
+        }
+    }
+}
