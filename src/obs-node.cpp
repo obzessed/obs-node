@@ -6,6 +6,7 @@
  */
 
 #include "obs-node.h"
+#include "./bindings/obs-bindings.h"
 
 // Node.js headers
 #include <node/node.h>
@@ -15,6 +16,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <mutex>
 
 #define ISOLATE_THREAD_POOL_SIZE 4
 
@@ -40,6 +42,31 @@ namespace obs_node {
     
     bool is_initialized() {
         return g_initialized;
+    }
+
+    // Console callback management
+    static std::mutex g_console_mutex;
+    static ConsoleCallback g_console_callback = nullptr;
+
+    void SetConsoleCallback(ConsoleCallback cb) {
+        std::lock_guard<std::mutex> lock(g_console_mutex);
+        g_console_callback = cb;
+    }
+
+    // Internal binding exposed to JS to route console messages to C++
+    static void InternalConsoleLog(const v8::FunctionCallbackInfo<v8::Value>& args) {
+        v8::Isolate* isolate = args.GetIsolate();
+        if (args.Length() < 2 || !args[0]->IsString() || !args[1]->IsString()) return;
+
+        v8::String::Utf8Value type(isolate, args[0]);
+        v8::String::Utf8Value msg(isolate, args[1]);
+
+        std::lock_guard<std::mutex> lock(g_console_mutex);
+        if (g_console_callback) {
+            std::string typeStr = *type ? *type : "log";
+            std::string msgStr = *msg ? *msg : "";
+            g_console_callback(typeStr, msgStr);
+        }
     }
 }
 
@@ -155,10 +182,12 @@ extern "C" void obs_node_load(void)
             v8::HandleScope handle_scope(isolate);
             v8::Context::Scope context_scope(g_setup->context());
 
-            // First, call LoadEnvironment with empty script for basic Node.js setup
+            // First, call LoadEnvironment with CommonJS entry that provides require
+            // Using the internal embedder hook to get access to require
             v8::MaybeLocal<v8::Value> result = node::LoadEnvironment(
                 g_setup->env(),
-                "// Node.js initialized\n"
+                "const { createRequire } = require('module');\n"
+                "globalThis.require = createRequire(process.cwd() + '/obs-script.js');\n"
             );
 
             if (result.IsEmpty()) {
@@ -185,6 +214,106 @@ extern "C" void obs_node_load(void)
             } else {
                 script->Run(g_setup->context());
                 obs_log(LOG_INFO, "Bootstrap script executed");
+            }
+
+            // Initialize OBS bindings
+            obs_bindings::Initialize(isolate, g_setup->context());
+            obs_log(LOG_INFO, "OBS JavaScript bindings initialized");
+
+            // Register obs.internal.log for console redirection
+            v8::Local<v8::Object> obs = v8::Local<v8::Object>::Cast(
+                g_setup->context()->Global()->Get(g_setup->context(), 
+                    v8::String::NewFromUtf8(isolate, "obs").ToLocalChecked()).ToLocalChecked());
+            
+            v8::Local<v8::Object> internal = v8::Object::New(isolate);
+            internal->Set(g_setup->context(),
+                v8::String::NewFromUtf8(isolate, "log").ToLocalChecked(),
+                v8::Function::New(g_setup->context(), obs_node::InternalConsoleLog).ToLocalChecked()
+            ).Check();
+
+            obs->Set(g_setup->context(),
+                v8::String::NewFromUtf8(isolate, "internal").ToLocalChecked(),
+                internal
+            ).Check();
+
+            // Register obs: module scheme for require('obs:sources') etc
+            const char* moduleRegistration = R"JS(
+                (function() {
+                    // Hook console logging to redirect to REPL
+                    const util = require('util');
+                    const originalConsole = globalThis.console;
+                    
+                    globalThis.console = {
+                        ...originalConsole,
+                        log: (...args) => {
+                            if (originalConsole.log) originalConsole.log(...args);
+                            obs.internal.log('log', util.formatWithOptions({colors: true}, ...args));
+                        },
+                        info: (...args) => {
+                             if (originalConsole.info) originalConsole.info(...args);
+                            obs.internal.log('info', util.formatWithOptions({colors: true}, ...args));
+                        },
+                        warn: (...args) => {
+                             if (originalConsole.warn) originalConsole.warn(...args);
+                            obs.internal.log('warn', util.formatWithOptions({colors: true}, ...args));
+                        },
+                        error: (...args) => {
+                             if (originalConsole.error) originalConsole.error(...args);
+                            obs.internal.log('error', util.formatWithOptions({colors: true}, ...args));
+                        }
+                    };
+
+                    // Make require available globally for REPL
+                    if (typeof require !== 'undefined') {
+                        globalThis.require = require;
+                    }
+                    
+                    // Create obs module exports
+                    const obsModules = {
+                        'obs': globalThis.obs,
+                        'obs:sources': globalThis.obs?.sources,
+                        'obs:scenes': globalThis.obs?.scenes,
+                        'obs:sceneItems': globalThis.obs?.sceneItems,
+                        'obs:filters': globalThis.obs?.filters,
+                        'obs:transitions': globalThis.obs?.transitions,
+                        'obs:frontend': globalThis.obs?.frontend,
+                        'obs:canvas': globalThis.obs?.canvas,
+                        'obs:events': globalThis.obs?.events,
+                        'obs:modules': globalThis.obs?.modules,
+                        'obs:outputs': globalThis.obs?.outputs,
+                        'obs:encoders': globalThis.obs?.encoders,
+                        'obs:services': globalThis.obs?.services,
+                        'obs:data': globalThis.obs?.data,
+                        'obs:properties': globalThis.obs?.properties,
+                        'obs:audio': globalThis.obs?.audio,
+                        'obs:hotkeys': globalThis.obs?.hotkeys
+                    };
+                    
+                    // Store original require
+                    const originalRequire = globalThis.require;
+                    
+                    // Create wrapped require that handles obs: prefix
+                    if (originalRequire) {
+                        globalThis.require = function(id) {
+                            if (id === 'obs' || id.startsWith('obs:')) {
+                                const mod = obsModules[id];
+                                if (mod) return mod;
+                                throw new Error(`Unknown OBS module: ${id}`);
+                            }
+                            return originalRequire(id);
+                        };
+                        // Preserve require properties
+                        Object.assign(globalThis.require, originalRequire);
+                    }
+                })();
+            )JS";
+            
+            v8::Local<v8::String> modSource = 
+                v8::String::NewFromUtf8(isolate, moduleRegistration).ToLocalChecked();
+            v8::Local<v8::Script> modScript;
+            if (v8::Script::Compile(g_setup->context(), modSource).ToLocal(&modScript)) {
+                modScript->Run(g_setup->context());
+                obs_log(LOG_INFO, "OBS module resolver registered");
             }
         }
 

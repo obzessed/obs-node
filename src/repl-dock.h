@@ -34,6 +34,8 @@ private:
     void appendResult(const QString& text);
     void historyUp();
     void historyDown();
+    void loadHistory();
+    void saveHistory();
 
     QPlainTextEdit* outputWidget_ = nullptr;
     QLineEdit* inputWidget_ = nullptr;

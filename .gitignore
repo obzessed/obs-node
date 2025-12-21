@@ -4,9 +4,11 @@
 # Except for default project files
 !/.github
 !/build-aux
+!/bindings
 !/cmake
 !/data
 !/src
+!/typings
 !.clang-format
 !.gersemirc
 !.gitignore

@@ -14,3 +14,13 @@ void obs_node_unload(void);
 #ifdef __cplusplus
 }
 #endif
+
+#ifdef __cplusplus
+#include <string>
+#include <functional>
+
+namespace obs_node {
+    using ConsoleCallback = std::function<void(const std::string& type, const std::string& msg)>;
+    void SetConsoleCallback(ConsoleCallback cb);
+}
+#endif
