@@ -34,6 +34,12 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c)
+file(GLOB_RECURSE PLUGIN_SOURCES
+    src/*.c
+    src/*.cc
+    src/*.cpp
+)
+
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${PLUGIN_SOURCES})
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
