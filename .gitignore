@@ -18,6 +18,9 @@
 !CMakeLists.txt
 !CMakePresets.json
 !LICENSE
+!TODO.md
+!BUILD.md
+!NOTES.md
 !README.md
 
 # Exclude lock files

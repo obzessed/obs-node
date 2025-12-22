@@ -1,0 +1,4 @@
+- We currently pull a release version of libnode
+- which is not abi compatible with debug build of the target.
+- since we do dynamic linking, this wont throw any errors at build time.
+- but it will throw errors at runtime.

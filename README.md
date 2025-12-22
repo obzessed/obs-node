@@ -1,59 +1,151 @@
-# OBS Plugin Template
+# OBS Node.js Plugin
 
-## Introduction
+![Status](https://img.shields.io/badge/status-early%20development-orange)
+![OBS](https://img.shields.io/badge/OBS-31.0+-purple)
+![License](https://img.shields.io/badge/license-GPLv2-blue)
 
-The plugin template is meant to be used as a starting point for OBS Studio plugin development. It includes:
+**Bring in the power of the Node.js ecosystem to Supercharge your OBS Studio with JavaScript automation.**
 
-* Boilerplate plugin source code
-* A CMake project file
-* GitHub Actions workflows and repository actions
+Run scripts, automate scene switching, control filters dynamically, and build custom workflows—all using JavaScript and npm packages.
 
-## Supported Build Environments
+> ⚠️ **Early Development** — This plugin is under active development. Expect breaking changes between versions. Not recommended for production use yet.
 
-| Platform  | Tool   |
-|-----------|--------|
-| Windows   | Visual Studio 17 2022 |
-| macOS     | XCode 16.0 |
-| Windows, macOS  | CMake 3.30.5 |
-| Ubuntu 24.04 | CMake 3.28.3 |
-| Ubuntu 24.04 | `ninja-build` |
-| Ubuntu 24.04 | `pkg-config`
-| Ubuntu 24.04 | `build-essential` |
+---
 
-## Quick Start
+## ✨ Features
 
-An absolute bare-bones [Quick Start Guide](https://github.com/obsproject/obs-plugintemplate/wiki/Quick-Start-Guide) is available in the wiki.
+- **🎬 Script Editor** — Built-in code editor with line numbers, zoom, and run-on-demand execution
+- **💻 REPL Console** — Interactive JavaScript console for live experimentation
+- **🔧 Full OBS API Access** — Control sources, scenes, filters, transitions, audio, and more
+- **⚡ Event-Driven** — React to OBS events (scene changes, stream start/stop, etc.)
+- **� WebSocket API (No Network)** — Direct access to obs-websocket protocol internally—no TCP connection needed
+- **📡 Vendor Events** — Register custom vendor requests and emit events for external integrations
+- **📦 Node.js Powered** — JavaScript runtime with basic Node.js APIs (full support planned)
 
-## Documentation
+---
 
-All documentation can be found in the [Plugin Template Wiki](https://github.com/obsproject/obs-plugintemplate/wiki).
+## 🚀 Quick Examples
 
-Suggested reading to get up and running:
+```javascript
+// Switch to a scene
+obs.frontend.setCurrentScene("Gaming")
 
-* [Getting started](https://github.com/obsproject/obs-plugintemplate/wiki/Getting-Started)
-* [Build system requirements](https://github.com/obsproject/obs-plugintemplate/wiki/Build-System-Requirements)
-* [Build system options](https://github.com/obsproject/obs-plugintemplate/wiki/CMake-Build-System-Options)
+// Toggle a source's visibility
+obs.sceneItems.setVisible("Main Scene", "Webcam", false)
 
-## GitHub Actions & CI
+// Adjust filter settings on the fly
+obs.filters.setSettings("Camera", "Color Correction", {
+  brightness: 0.1,
+  saturation: -0.5
+})
 
-Default GitHub Actions workflows are available for the following repository actions:
+// React to events
+obs.events.on("StreamStarted", () => {
+  console.log("We're live! 🎉")
+})
 
-* `push`: Run for commits or tags pushed to `master` or `main` branches.
-* `pr-pull`: Run when a Pull Request has been pushed or synchronized.
-* `dispatch`: Run when triggered by the workflow dispatch in GitHub's user interface.
-* `build-project`: Builds the actual project and is triggered by other workflows.
-* `check-format`: Checks CMake and plugin source code formatting and is triggered by other workflows.
+// Direct WebSocket API access (no network!)
+const list = obs.websocket.call('GetSceneItemList', {
+    sceneName: "My Scene"
+});
 
-The workflows make use of GitHub repository actions (contained in `.github/actions`) and build scripts (contained in `.github/scripts`) which are not needed for local development, but might need to be adjusted if additional/different steps are required to build the plugin.
+// Register vendor request handler
+obs.websocket.on("myVendor", "doSomething", (data) => {
+  console.log("Received:", data)
+  return { success: true }
+})
 
-### Retrieving build artifacts
+// Emit vendor event to connected clients
+obs.websocket.emit("myVendor", "statusUpdate", { status: "ready" })
+```
 
-Successful builds on GitHub Actions will produce build artifacts that can be downloaded for testing. These artifacts are commonly simple archives and will not contain package installers or installation programs.
+---
 
-### Building a Release
+## 📖 Documentation
 
-To create a release, an appropriately named tag needs to be pushed to the `main`/`master` branch using semantic versioning (e.g., `12.3.4`, `23.4.5-beta2`). A draft release will be created on the associated repository with generated installer packages or installation programs attached as release artifacts.
+- **[API Reference](docs/API.md)** — Complete API documentation with examples
+- **[TypeScript Definitions](typings/obs.d.ts)** — Full type definitions for IDE support
 
-## Signing and Notarizing on macOS
+---
 
-Basic concepts of codesigning and notarization on macOS are explained in the correspodning [Wiki article](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS) which has a specific section for the [GitHub Actions setup](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS#setting-up-code-signing-for-github-actions).
+## 🛠️ Installation
+
+### Requirements
+- OBS Studio 31.0 or later
+- Windows 10/11 (macOS and Linux coming soon)
+
+### From Releases
+> 📦 **Coming soon!** Pre-built releases will be available once CI is ready.
+> For now, please build from source.
+
+### Building from Source
+> 🔨 **Build instructions coming soon!** We're working on proper documentation.
+
+---
+
+## 🎯 Use Cases
+
+| Scenario | What You Can Do |
+|----------|-----------------|
+| **Stream Automation** | Auto-switch scenes based on game state or viewer commands |
+| **Dynamic Overlays** | Update text sources, trigger animations on events |
+| **Filter Control** | Adjust color grading, zoom effects in response to actions |
+| **Chat Integration** | Build custom chat bots that control OBS |
+| **Timed Events** | Schedule scene changes, countdowns, breaks |
+| **Multi-Stream** | Coordinate multiple sources and outputs programmatically |
+
+---
+
+## 🗺️ Roadmap
+
+Planned features for future releases:
+
+| Priority | Feature | Description |
+|----------|---------|-------------|
+| 🔥 High | **macOS & Linux Support** | Cross-platform builds (currently Windows-only) |
+| 🔥 High | **Syntax Highlighting & IntelliSense** | Code editor with syntax colors and autocomplete |
+| 🔥 High | **Hot Reload** | Auto-reload scripts on file changes |
+| 🔥 High | **Extension/Plugin System** | Load and manage third-party JavaScript extensions |
+| 🔥 High | **Multi-Script Parallel Runtime** | Run multiple scripts concurrently in isolated contexts |
+| 🔧 Medium | **Debugging Tools** | Breakpoints, step-through debugging, variable inspection |
+| 🔧 Medium | **Script Marketplace** | Community script sharing and discovery |
+| 🔧 Medium | **Source Creation APIs** | Create custom OBS sources with JavaScript or WebAssembly |
+| 🔧 Medium | **WebAssembly Support** | Run WASM modules for high-performance operations |
+| 🔧 Medium | **JSX UI Components** | Figma-like API for building Qt UIs with JSX syntax |
+| 🔧 Medium | **Canvas Drawing API** | HTML Canvas-like API to draw directly on OBS sources |
+| 🔧 Medium | **FFI Module** | Access non-bound libobs APIs directly via foreign function interface |
+| ⚙️ Low | **Runtime Version Selector** | Choose between LTS Node.js versions |
+
+Have a feature request? [Open an issue](../../issues)!
+
+---
+
+## ⚠️ Early Development Notice
+
+This plugin is in **active early development**. You should expect:
+
+- 🔄 Breaking API changes between versions
+- 🐛 Bugs and incomplete features
+- 📝 Documentation gaps
+- ⚙️ Platform limitations (Windows-only for now)
+
+We welcome feedback, bug reports, and contributions! Please open an issue if you encounter problems.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request
+
+For bug reports and feature requests, please use [GitHub Issues](../../issues).
+
+---
+
+## 📄 License
+
+This project is licensed under the **GNU General Public License v2.0** — see [LICENSE](LICENSE) for details.
+
+Built with ❤️ for the OBS community.

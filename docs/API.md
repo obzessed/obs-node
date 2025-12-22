@@ -36,7 +36,7 @@ The OBS Node.js Plugin exposes the OBS Studio API through a global `obs` object.
 | `Ctrl+Scroll` | Zoom |
 
 ### REPL Console
-**View > Docks > Node REPL** - Interactive JavaScript console.
+**Docks > Node REPL** - Interactive JavaScript console.
 
 ---
 
@@ -320,6 +320,6 @@ const settings = obs.filters.getSettings<ColorCorrectionSettings>(
 
 ## Notes
 
-- All API calls are synchronous
+- All API calls are synchronous (for now)
 - Use `setTimeout` or `async/await` for long operations
 - Source/filter names are case-sensitive

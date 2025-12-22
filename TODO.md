@@ -1,0 +1,6 @@
+- Extension/Plugin System.
+- Multi Script Parallel Runtime.
+- Own libnode for debug/release and static/dynamic builds
+- FIGMA plugin api like JSX ui building for building ui with Qt.
+- Html Canvas like api to draw in the canvas using obs graphics.
+- Impl a ffi module to access non-available binding apis from libobs.
