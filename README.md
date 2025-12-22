@@ -10,6 +10,8 @@ Run scripts, automate scene switching, control filters dynamically, and build cu
 
 > ⚠️ **Early Development** — This plugin is under active development. Expect breaking changes between versions. Not recommended for production use yet.
 
+![Script Editor and REPL](docs/looks/editor_and_repl.png)
+
 ---
 
 ## ✨ Features

@@ -38,8 +38,8 @@
     },
     "name": "obs-scripting-node",
     "displayName": "Javascript Scripting using Node.js for OBS",
-    "version": "1.0.0",
-    "author": "Your Name Here",
-    "website": "https://example.com",
-    "email": "me@example.com"
+    "version": "0.1.0",
+    "author": "Psyirius",
+    "website": "https://github.io/psyirius",
+    "email": "psyirius@gmail.com"
 }
