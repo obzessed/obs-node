@@ -75,6 +75,11 @@ static void SourcesGet(const v8::FunctionCallbackInfo<v8::Value>& args) {
     set("showing", v8::Boolean::New(isolate, obs_source_showing(source)));
     set("muted", v8::Boolean::New(isolate, obs_source_muted(source)));
     
+    const char* uuid = obs_source_get_uuid(source);
+    if (uuid) {
+        set("uuid", v8::String::NewFromUtf8(isolate, uuid).ToLocalChecked());
+    }
+    
     obs_source_release(source);
     
     args.GetReturnValue().Set(obj);

@@ -396,6 +396,367 @@ static void CanvasSetName(const v8::FunctionCallbackInfo<v8::Value>& args) {
     args.GetReturnValue().Set(true);
 }
 
+// obs.canvas.create(name, settings?, flags?)
+// settings: { baseWidth, baseHeight, outputWidth, outputHeight, fpsNum, fpsDen }
+// flags: number (canvas flags)
+static void CanvasCreate(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    
+    if (args.Length() < 1 || !args[0]->IsString()) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    
+    v8::String::Utf8Value name(isolate, args[0]);
+    
+    // Get current video info as default
+    obs_video_info ovi;
+    if (!obs_get_video_info(&ovi)) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    
+    // Override with settings if provided
+    if (args.Length() >= 2 && args[1]->IsObject()) {
+        v8::Local<v8::Object> settings = args[1].As<v8::Object>();
+        auto getUint = [&](const char* key, uint32_t& target) {
+            v8::Local<v8::String> k = v8::String::NewFromUtf8(isolate, key).ToLocalChecked();
+            if (settings->Has(context, k).FromMaybe(false)) {
+                v8::Local<v8::Value> v = settings->Get(context, k).ToLocalChecked();
+                if (v->IsNumber()) target = v->Uint32Value(context).FromMaybe(target);
+            }
+        };
+        getUint("baseWidth", ovi.base_width);
+        getUint("baseHeight", ovi.base_height);
+        getUint("outputWidth", ovi.output_width);
+        getUint("outputHeight", ovi.output_height);
+        getUint("fpsNum", ovi.fps_num);
+        getUint("fpsDen", ovi.fps_den);
+    }
+    
+    uint32_t flags = 0;
+    if (args.Length() >= 3 && args[2]->IsNumber()) {
+        flags = args[2]->Uint32Value(context).FromMaybe(0);
+    }
+    
+    obs_canvas_t* canvas = obs_canvas_create(*name, &ovi, flags);
+    if (!canvas) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    obs_canvas_release(canvas);
+    args.GetReturnValue().Set(true);
+}
+
+// obs.canvas.createPrivate(name, settings?, flags?)
+static void CanvasCreatePrivate(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    
+    if (args.Length() < 1 || !args[0]->IsString()) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    
+    v8::String::Utf8Value name(isolate, args[0]);
+    
+    obs_video_info ovi;
+    if (!obs_get_video_info(&ovi)) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    
+    if (args.Length() >= 2 && args[1]->IsObject()) {
+        v8::Local<v8::Object> settings = args[1].As<v8::Object>();
+        auto getUint = [&](const char* key, uint32_t& target) {
+            v8::Local<v8::String> k = v8::String::NewFromUtf8(isolate, key).ToLocalChecked();
+            if (settings->Has(context, k).FromMaybe(false)) {
+                v8::Local<v8::Value> v = settings->Get(context, k).ToLocalChecked();
+                if (v->IsNumber()) target = v->Uint32Value(context).FromMaybe(target);
+            }
+        };
+        getUint("baseWidth", ovi.base_width);
+        getUint("baseHeight", ovi.base_height);
+        getUint("outputWidth", ovi.output_width);
+        getUint("outputHeight", ovi.output_height);
+        getUint("fpsNum", ovi.fps_num);
+        getUint("fpsDen", ovi.fps_den);
+    }
+    
+    uint32_t flags = 0;
+    if (args.Length() >= 3 && args[2]->IsNumber()) {
+        flags = args[2]->Uint32Value(context).FromMaybe(0);
+    }
+    
+    obs_canvas_t* canvas = obs_canvas_create_private(*name, &ovi, flags);
+    if (!canvas) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    obs_canvas_release(canvas);
+    args.GetReturnValue().Set(true);
+}
+
+// obs.canvas.remove(name)
+static void CanvasRemove(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    if (args.Length() < 1 || !args[0]->IsString()) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    v8::String::Utf8Value name(isolate, args[0]);
+    obs_canvas_t* canvas = obs_get_canvas_by_name(*name);
+    if (!canvas) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    obs_canvas_remove(canvas);
+    obs_canvas_release(canvas);
+    args.GetReturnValue().Set(true);
+}
+
+// obs.canvas.save(canvasName) -> returns obs_data as JSON string
+static void CanvasSave(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    if (args.Length() < 1 || !args[0]->IsString()) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    v8::String::Utf8Value name(isolate, args[0]);
+    
+    obs_canvas_t* canvas = obs_get_canvas_by_name(*name);
+    if (!canvas) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    obs_data_t* data = obs_save_canvas(canvas);
+    obs_canvas_release(canvas);
+    
+    if (!data) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+
+    if (const char *json = obs_data_get_json(data)) {
+        args.GetReturnValue().Set(v8::String::NewFromUtf8(isolate, json).ToLocalChecked());
+    } else {
+        args.GetReturnValue().SetNull();
+    }
+    obs_data_release(data);
+}
+
+// obs.canvas.load(jsonData) -> creates and returns canvas name (or null)
+// obs_load_canvas(obs_data_t*) returns obs_canvas_t*
+static void CanvasLoad(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    if (args.Length() < 1 || !args[0]->IsString()) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    v8::String::Utf8Value jsonData(isolate, args[0]);
+    
+    obs_data_t* data = obs_data_create_from_json(*jsonData);
+    if (!data) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    obs_canvas_t* canvas = obs_load_canvas(data);
+    obs_data_release(data);
+    
+    if (!canvas) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    const char* name = obs_canvas_get_name(canvas);
+    if (name) {
+        args.GetReturnValue().Set(v8::String::NewFromUtf8(isolate, name).ToLocalChecked());
+    } else {
+        args.GetReturnValue().SetNull();
+    }
+    obs_canvas_release(canvas);
+}
+
+// obs.canvas.addScene(canvasName, sceneName) - Creates a NEW scene on the canvas
+static void CanvasAddScene(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    if (args.Length() < 2 || !args[0]->IsString() || !args[1]->IsString()) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    v8::String::Utf8Value canvasName(isolate, args[0]);
+    v8::String::Utf8Value sceneName(isolate, args[1]);
+    
+    obs_canvas_t* canvas = obs_get_canvas_by_name(*canvasName);
+    if (!canvas) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    
+    obs_scene_t* scene = obs_canvas_scene_create(canvas, *sceneName);
+    obs_canvas_release(canvas);
+    
+    args.GetReturnValue().Set(scene != nullptr);
+}
+
+// obs.canvas.removeScene(sceneName) - obs_canvas_scene_remove takes only scene
+static void CanvasRemoveScene(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    if (args.Length() < 1 || !args[0]->IsString()) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    v8::String::Utf8Value sceneName(isolate, args[0]);
+    
+    obs_source_t* sceneSource = obs_get_source_by_name(*sceneName);
+    if (!sceneSource) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    
+    obs_scene_t* scene = obs_scene_from_source(sceneSource);
+    if (scene) {
+        obs_canvas_scene_remove(scene);
+    }
+    
+    obs_source_release(sceneSource);
+    args.GetReturnValue().Set(scene != nullptr);
+}
+
+// obs.canvas.moveScene(currentCanvasName, sceneName, destCanvasName)
+static void CanvasMoveScene(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    if (args.Length() < 3 || !args[0]->IsString() || !args[1]->IsString() || !args[2]->IsString()) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    v8::String::Utf8Value currentCanvasName(isolate, args[0]);
+    v8::String::Utf8Value sceneName(isolate, args[1]);
+    v8::String::Utf8Value destCanvasName(isolate, args[2]);
+    
+    obs_canvas_t* currCanvas = obs_get_canvas_by_name(*currentCanvasName); // Not technically needed for the call but good for verification if validation needed
+    obs_canvas_t* destCanvas = obs_get_canvas_by_name(*destCanvasName);
+    obs_source_t* scene = obs_get_source_by_name(*sceneName);
+    
+    if (destCanvas && scene) {
+        obs_scene_t* sceneObj = obs_scene_from_source(scene);
+        if (sceneObj) {
+            obs_canvas_move_scene(sceneObj, destCanvas);
+        }
+    }
+    
+    if (currCanvas) obs_canvas_release(currCanvas);
+    if (destCanvas) obs_canvas_release(destCanvas);
+    if (scene) obs_source_release(scene);
+    
+    args.GetReturnValue().Set(true);
+}
+
+// obs.canvas.getScene(canvasName, sceneName)
+static void CanvasGetScene(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    
+    if (args.Length() < 2 || !args[0]->IsString() || !args[1]->IsString()) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    v8::String::Utf8Value canvasName(isolate, args[0]);
+    v8::String::Utf8Value sceneName(isolate, args[1]);
+    
+    obs_canvas_t* canvas = obs_get_canvas_by_name(*canvasName);
+    if (!canvas) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    obs_scene_t* scene = obs_canvas_get_scene_by_name(canvas, *sceneName);
+    if (scene) {
+        obs_source_t* source = obs_scene_get_source(scene);
+        const char* name = obs_source_get_name(source);
+        args.GetReturnValue().Set(v8::String::NewFromUtf8(isolate, name ? name : "").ToLocalChecked());
+    } else {
+        args.GetReturnValue().SetNull();
+    }
+    
+    obs_canvas_release(canvas);
+}
+
+// obs.canvas.getSource(canvasName, sourceName)
+static void CanvasGetSource(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    
+    if (args.Length() < 2 || !args[0]->IsString() || !args[1]->IsString()) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    v8::String::Utf8Value canvasName(isolate, args[0]);
+    v8::String::Utf8Value sourceName(isolate, args[1]);
+    
+    obs_canvas_t* canvas = obs_get_canvas_by_name(*canvasName);
+    if (!canvas) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    obs_source_t* source = obs_canvas_get_source_by_name(canvas, *sourceName);
+    if (source) {
+        // Just return the name to confirm existence/retrieval for now, 
+        // or we could return a SourceInfo object. User just asked for getSource.
+        // Let's return the name.
+        const char* name = obs_source_get_name(source);
+        args.GetReturnValue().Set(v8::String::NewFromUtf8(isolate, name ? name : "").ToLocalChecked());
+        obs_source_release(source);
+    } else {
+        args.GetReturnValue().SetNull();
+    }
+    
+    obs_canvas_release(canvas);
+}
+
+// obs.canvas.setVideoSettings(settings)
+static void CanvasSetVideoSettings(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+
+    if (args.Length() < 1 || !args[0]->IsObject()) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+
+    v8::Local<v8::Object> settings = args[0].As<v8::Object>();
+    
+    obs_video_info ovi;
+    if (!obs_get_video_info(&ovi)) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+
+    // Helper to get uint32
+    auto getUint = [&](const char* key, uint32_t& target) {
+        v8::Local<v8::String> k = v8::String::NewFromUtf8(isolate, key).ToLocalChecked();
+        if (settings->Has(context, k).FromMaybe(false)) {
+            v8::Local<v8::Value> v = settings->Get(context, k).ToLocalChecked();
+            if (v->IsNumber()) target = v->Uint32Value(context).FromMaybe(target);
+        }
+    };
+
+    getUint("baseWidth", ovi.base_width);
+    getUint("baseHeight", ovi.base_height);
+    getUint("outputWidth", ovi.output_width);
+    getUint("outputHeight", ovi.output_height);
+    getUint("fpsNum", ovi.fps_num);
+    getUint("fpsDen", ovi.fps_den);
+    // TODO: Support colorspace, range, etc? For now, resolution and FPS are primary.
+
+    int ret = obs_reset_video(&ovi);
+    args.GetReturnValue().Set(ret == OBS_VIDEO_SUCCESS);
+}
+
 void SetupCanvasBindings(v8::Isolate* isolate, v8::Local<v8::Object> obs) {
     v8::Local<v8::Context> context = isolate->GetCurrentContext();
     
@@ -423,6 +784,23 @@ void SetupCanvasBindings(v8::Isolate* isolate, v8::Local<v8::Object> obs) {
     setFunc("get", CanvasGet);
     setFunc("getScenes", CanvasGetScenes);
     setFunc("setName", CanvasSetName);
+
+    // Advanced Canvas Lifecycle
+    setFunc("create", CanvasCreate);
+    setFunc("createPrivate", CanvasCreatePrivate);
+    setFunc("remove", CanvasRemove);
+    setFunc("save", CanvasSave);
+    setFunc("load", CanvasLoad);
+
+    // Advanced Canvas Scene Management
+    setFunc("addScene", CanvasAddScene);
+    setFunc("removeScene", CanvasRemoveScene);
+    setFunc("moveScene", CanvasMoveScene);
+    setFunc("getScene", CanvasGetScene);
+    setFunc("getSource", CanvasGetSource);
+
+    // Video Settings
+    setFunc("setVideoSettings", CanvasSetVideoSettings);
     
     obs->Set(context,
         v8::String::NewFromUtf8(isolate, "canvas").ToLocalChecked(),

@@ -226,6 +226,7 @@ void ReplDock::executeCommand()
         commandHistory_.removeLast();
     }
     historyIndex_ = -1;
+    saveHistory(); // Auto-save history on change for crash resilience
 
     inputWidget_->clear();
 

@@ -81,6 +81,14 @@ static void ScenesGet(const v8::FunctionCallbackInfo<v8::Value>& args) {
         v8::String::NewFromUtf8(isolate, *name).ToLocalChecked()
     ).Check();
     
+    const char* uuid = obs_source_get_uuid(source);
+    if (uuid) {
+        obj->Set(context, 
+            v8::String::NewFromUtf8(isolate, "uuid").ToLocalChecked(),
+            v8::String::NewFromUtf8(isolate, uuid).ToLocalChecked()
+        ).Check();
+    }
+    
     v8::Local<v8::Array> itemsArray = v8::Array::New(isolate, static_cast<int>(items.size()));
     for (size_t i = 0; i < items.size(); i++) {
         itemsArray->Set(context, static_cast<uint32_t>(i),

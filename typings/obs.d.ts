@@ -131,6 +131,8 @@ declare namespace OBS {
         showing: boolean;
         /** Whether source is muted */
         muted: boolean;
+        /** Source UUID */
+        uuid?: string;
     }
 
     // ============================================================================
@@ -151,6 +153,8 @@ declare namespace OBS {
     interface SceneInfo {
         /** Scene name */
         name: string;
+        /** Scene UUID */
+        uuid?: string;
         /** Array of source names in this scene */
         items: string[];
     }
@@ -239,6 +243,28 @@ declare namespace OBS {
 
         /** Reorder a filter */
         reorder(sourceName: string, filterName: string, newIndex: number): boolean;
+
+        /** 
+         * Get filter settings as a JavaScript object
+         * @param sourceName - Name of the parent source
+         * @param filterName - Name of the filter
+         * @param includeDefaults - If true, includes default values in the result
+         * @returns Settings object or null if filter not found
+         */
+        getSettings<T extends Record<string, unknown> = Record<string, unknown>>(
+            sourceName: string,
+            filterName: string,
+            includeDefaults?: boolean
+        ): T | null;
+
+        /**
+         * Update filter settings
+         * @param sourceName - Name of the parent source
+         * @param filterName - Name of the filter
+         * @param settings - Settings object to apply
+         * @returns true if successful
+         */
+        setSettings(sourceName: string, filterName: string, settings: Record<string, unknown>): boolean;
     }
 
     interface FilterInfo {
@@ -303,6 +329,12 @@ declare namespace OBS {
 
         /** Enable or disable studio mode */
         setStudioMode(enabled: boolean): void;
+
+        /** Get T-Bar position (0.0 - 1.0) */
+        getTBarPosition(): number;
+
+        /** Set T-Bar position (0.0 - 1.0) */
+        setTBarPosition(pos: number): void;
     }
 
     interface StreamingAPI {
@@ -389,6 +421,39 @@ declare namespace OBS {
 
         /** Rename a canvas (OBS 31+) */
         setName(oldName: string, newName: string): boolean;
+
+        /** Create a new canvas (OBS 31+) */
+        create(name: string, settings?: Partial<VideoInfo>, flags?: number): boolean;
+
+        /** Create a new private canvas (OBS 31+) */
+        createPrivate(name: string, settings?: Partial<VideoInfo>, flags?: number): boolean;
+
+        /** Remove a canvas (OBS 31+) - Note: Uses obs_canvas_remove, not destroy */
+        remove(name: string): boolean;
+
+        /** Save canvas state to JSON string (OBS 31+) */
+        save(canvasName: string): string | null;
+
+        /** Load canvas state from JSON string - creates and returns canvas name (OBS 31+) */
+        load(jsonData: string): string | null;
+
+        /** Create a NEW scene on the canvas (OBS 31+) */
+        addScene(canvasName: string, sceneName: string): boolean;
+
+        /** Remove a scene from its canvas (OBS 31+) - takes only scene name */
+        removeScene(sceneName: string): boolean;
+
+        /** Move a scene to another canvas (OBS 31+) */
+        moveScene(currentCanvas: string, sceneName: string, destCanvas: string): boolean;
+
+        /** Get a scene from a canvas by name (OBS 31+) */
+        getScene(canvasName: string, sceneName: string): string | null;
+
+        /** Get a source from a canvas by name (OBS 31+) */
+        getSource(canvasName: string, sourceName: string): string | null;
+
+        /** Set global video settings (resolution, fps) */
+        setVideoSettings(settings: Partial<VideoInfo>): boolean;
     }
 
     interface Resolution {
@@ -467,6 +532,7 @@ declare namespace OBS {
         | 'studioModeDisabled'
         | 'virtualCamStarted'
         | 'virtualCamStopped'
+        | 'tBarChanged'
         | 'exit';
 
     /** Event callback function */
@@ -674,12 +740,159 @@ declare namespace OBS {
         emit(vendor: string, type: string, data: object): boolean;
 
         /**
+         * Register a standard WebSocket event listener.
+         * @param event Event type (e.g. 'CurrentProgramSceneChanged')
+         * @param callback Function to handle event. Receives event data object.
+         */
+        on<E extends keyof OBSEventTypes>(event: E, callback: (data: OBSEventTypes[E]) => void): boolean;
+        on(event: string, callback: (data: any) => void): boolean;
+
+        /**
          * Register a vendor request handler.
          * @param vendor Vendor name
          * @param type Request type
          * @param callback Function to handle request. Receives request data, returns response data object.
          */
         on(vendor: string, type: string, callback: (data: any) => any): boolean;
+
+        /**
+         * Call a standard WebSocket request internally.
+         * @param type Request type (e.g. 'GetVersion')
+         * @param data Request data
+         */
+        call<R extends keyof OBSRequestTypes>(type: R, data?: OBSRequestTypes[R]['request']): { status: number; comment?: string; data: OBSRequestTypes[R]['response'] };
+        call(type: string, data?: object): { status: number; comment?: string; data?: any };
+
+        /**
+         * Get detailed WebSocket server info.
+         * returns object with: enabled, port, authRequired, running, version.
+         */
+        getServerInfo(): WebSocketServerInfo;
+
+        /**
+         * Get the OBS WebSocket API version (RPC version).
+         */
+        getApiVersion(): number;
+    }
+
+    interface WebSocketServerInfo {
+        available: boolean;
+        enabled: boolean;
+        port?: number;
+        authRequired?: boolean;
+        password?: string;
+        rpcVersion?: number;
+    }
+
+    // ============================================================================
+    // OBS WebSocket Protocol Types (Partial)
+    // Reference: https://github.com/obsproject/obs-websocket/blob/master/docs/generated/protocol.json
+    // ============================================================================
+
+    interface OBSRequestTypes {
+        GetVersion: {
+            request: {};
+            response: {
+                obsVersion: string;
+                obsWebSocketVersion: string;
+                rpcVersion: number;
+                availableRequests: string[];
+                supportedImageFormats: string[];
+                platform: string;
+                platformDescription: string;
+            };
+        };
+        GetStats: {
+            request: {};
+            response: {
+                cpuUsage: number;
+                memoryUsage: number;
+                availableDiskSpace: number;
+                activeWebSocketSessions: number;
+                averageFrameTime: number;
+                renderTotalFrames: number;
+                renderSkippedFrames: number;
+                outputTotalFrames: number;
+                outputSkippedFrames: number;
+                webSocketSessionIncomingMessages: number;
+                webSocketSessionOutgoingMessages: number;
+            };
+        };
+        GetHotkeyList: {
+            request: {};
+            response: {
+                hotkeys: string[];
+            };
+        };
+        TriggerHotkeyByName: {
+            request: {
+                hotkeyName: string;
+            };
+            response: {};
+        };
+        GetSceneList: {
+            request: {};
+            response: {
+                currentProgramSceneName: string;
+                currentPreviewSceneName: string | null;
+                scenes: {
+                    sceneName: string;
+                    sceneIndex: number;
+                }[];
+            };
+        };
+        GetCurrentProgramScene: {
+            request: {};
+            response: {
+                currentProgramSceneName: string;
+            };
+        };
+        SetCurrentProgramScene: {
+            request: {
+                sceneName: string;
+            };
+            response: {};
+        };
+        GetInputList: {
+            request: {
+                inputKind?: string;
+            };
+            response: {
+                inputs: {
+                    inputName: string;
+                    inputKind: string;
+                    unversionedInputKind: string;
+                }[];
+            };
+        };
+        // Fallback
+        [key: string]: { request: any; response: any };
+    }
+
+    interface OBSEventTypes {
+        CurrentProgramSceneChanged: {
+            sceneName: string;
+        };
+        CurrentPreviewSceneChanged: {
+            sceneName: string;
+        };
+        SceneListChanged: {
+            scenes: {
+                sceneName: string;
+                sceneIndex: number;
+            }[];
+        };
+        StreamStateChanged: {
+            outputActive: boolean;
+            outputState: string;
+        };
+        RecordStateChanged: {
+            outputActive: boolean;
+            outputState: string;
+        };
+        ExitStarted: {};
+        // Fallback
+        [key: string]: any;
     }
 
     // ============================================================================

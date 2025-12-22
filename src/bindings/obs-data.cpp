@@ -232,6 +232,7 @@ static void DataSetFilterSettings(const v8::FunctionCallbackInfo<v8::Value>& arg
     }
     
     obs_data_t* data = JSToObsData(isolate, context, settings);
+    // obs_source_update merges the new settings with existing ones (does not replace all settings)
     obs_source_update(filter, data);
     obs_data_release(data);
     obs_source_release(filter);

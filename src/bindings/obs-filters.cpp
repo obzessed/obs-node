@@ -222,6 +222,133 @@ static void FiltersReorder(const v8::FunctionCallbackInfo<v8::Value>& args) {
     args.GetReturnValue().Set(true);
 }
 
+// obs.filters.getSettings(sourceName, filterName, includeDefaults?) - Get filter settings
+static void FiltersGetSettings(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    
+    if (args.Length() < 2 || !args[0]->IsString() || !args[1]->IsString()) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    v8::String::Utf8Value sourceName(isolate, args[0]);
+    v8::String::Utf8Value filterName(isolate, args[1]);
+    bool includeDefaults = args.Length() > 2 && args[2]->BooleanValue(isolate);
+    
+    obs_source_t* source = obs_get_source_by_name(*sourceName);
+    if (!source) {
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    obs_source_t* filter = obs_source_get_filter_by_name(source, *filterName);
+    if (!filter) {
+        obs_source_release(source);
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    obs_data_t* settings = obs_source_get_settings(filter);
+    if (!settings) {
+        obs_source_release(filter);
+        obs_source_release(source);
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    obs_data_t* resultData = settings;
+    obs_data_t* defaults = nullptr;
+    
+    if (includeDefaults) {
+        defaults = obs_data_get_defaults(settings);
+        obs_data_apply(defaults, settings);
+        resultData = defaults;
+    }
+    
+    const char* json = obs_data_get_json(resultData);
+    if (!json) {
+        if (defaults) obs_data_release(defaults);
+        obs_data_release(settings);
+        obs_source_release(filter);
+        obs_source_release(source);
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    // Parse JSON string to JS object
+    v8::Local<v8::String> jsonStr = v8::String::NewFromUtf8(isolate, json).ToLocalChecked();
+    v8::Local<v8::Value> parsed;
+    if (!v8::JSON::Parse(context, jsonStr).ToLocal(&parsed)) {
+        if (defaults) obs_data_release(defaults);
+        obs_data_release(settings);
+        obs_source_release(filter);
+        obs_source_release(source);
+        args.GetReturnValue().SetNull();
+        return;
+    }
+    
+    if (defaults) obs_data_release(defaults);
+    obs_data_release(settings);
+    obs_source_release(filter);
+    obs_source_release(source);
+    
+    args.GetReturnValue().Set(parsed);
+}
+
+// obs.filters.setSettings(sourceName, filterName, settings) - Update filter settings
+static void FiltersSetSettings(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    
+    if (args.Length() < 3 || !args[0]->IsString() || !args[1]->IsString() || !args[2]->IsObject()) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    
+    v8::String::Utf8Value sourceName(isolate, args[0]);
+    v8::String::Utf8Value filterName(isolate, args[1]);
+    v8::Local<v8::Object> settingsObj = args[2].As<v8::Object>();
+    
+    // Convert JS object to JSON string
+    v8::Local<v8::String> jsonStr;
+    if (!v8::JSON::Stringify(context, settingsObj).ToLocal(&jsonStr)) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    v8::String::Utf8Value jsonUtf(isolate, jsonStr);
+    
+    obs_source_t* source = obs_get_source_by_name(*sourceName);
+    if (!source) {
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    
+    obs_source_t* filter = obs_source_get_filter_by_name(source, *filterName);
+    if (!filter) {
+        obs_source_release(source);
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    
+    obs_data_t* data = obs_data_create_from_json(*jsonUtf);
+    if (!data) {
+        obs_source_release(filter);
+        obs_source_release(source);
+        args.GetReturnValue().Set(false);
+        return;
+    }
+    
+    // obs_source_update merges the new settings with existing ones (does not replace all settings)
+    obs_source_update(filter, data);
+    
+    obs_data_release(data);
+    obs_source_release(filter);
+    obs_source_release(source);
+    
+    args.GetReturnValue().Set(true);
+}
+
 void SetupFilterBindings(v8::Isolate* isolate, v8::Local<v8::Object> obs) {
     v8::Local<v8::Context> context = isolate->GetCurrentContext();
     
@@ -241,6 +368,8 @@ void SetupFilterBindings(v8::Isolate* isolate, v8::Local<v8::Object> obs) {
     setFunc("remove", FiltersRemove);
     setFunc("setEnabled", FiltersSetEnabled);
     setFunc("reorder", FiltersReorder);
+    setFunc("getSettings", FiltersGetSettings);
+    setFunc("setSettings", FiltersSetSettings);
     
     obs->Set(context,
         v8::String::NewFromUtf8(isolate, "filters").ToLocalChecked(),

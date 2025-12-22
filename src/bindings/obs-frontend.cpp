@@ -177,6 +177,31 @@ static void SetStudioMode(const v8::FunctionCallbackInfo<v8::Value>& args) {
     obs_frontend_set_preview_program_mode(enabled);
 }
 
+static void GetTBarPosition(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    int posInt = obs_frontend_get_tbar_position();
+    float position = (float)posInt / 1023.0f;
+    if (position < 0.0f) position = 0.0f;
+    if (position > 1.0f) position = 1.0f;
+    args.GetReturnValue().Set(v8::Number::New(isolate, position));
+}
+
+static void SetTBarPosition(const v8::FunctionCallbackInfo<v8::Value>& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    
+    if (args.Length() < 1 || !args[0]->IsNumber()) {
+        return;
+    }
+    
+    float position = (float)args[0]->NumberValue(context).FromMaybe(0.0);
+    if (position < 0.0f) position = 0.0f;
+    if (position > 1.0f) position = 1.0f;
+    
+    int posInt = (int)(position * 1023.0f);
+    obs_frontend_set_tbar_position(posInt);
+}
+
 // ============================================================================
 // Replay Buffer
 // ============================================================================
@@ -253,6 +278,8 @@ void SetupFrontendBindings(v8::Isolate* isolate, v8::Local<v8::Object> obs) {
     setFunc(frontend, "setPreviewScene", SetPreviewScene);
     setFunc(frontend, "isStudioMode", IsStudioMode);
     setFunc(frontend, "setStudioMode", SetStudioMode);
+    setFunc(frontend, "getTBarPosition", GetTBarPosition);
+    setFunc(frontend, "setTBarPosition", SetTBarPosition);
     
     obs->Set(context,
         v8::String::NewFromUtf8(isolate, "frontend").ToLocalChecked(),

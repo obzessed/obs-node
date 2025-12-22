@@ -213,6 +213,16 @@ static void OnFrontendEvent(enum obs_frontend_event event, void* /*data*/) {
         case OBS_FRONTEND_EVENT_EXIT:
             InvokeCallbacksDirect("exit");
             break;
+
+        case OBS_FRONTEND_EVENT_TBAR_VALUE_CHANGED:
+            {
+                int valInt = obs_frontend_get_tbar_position();
+                float val = (float)valInt / 1023.0f;
+                char valStr[32];
+                snprintf(valStr, sizeof(valStr), "%.4f", val);
+                InvokeCallbacksDirect("tBarChanged", {valStr});
+            }
+            break;
             
         default:
             break;

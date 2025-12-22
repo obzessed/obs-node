@@ -15,7 +15,7 @@
 // Only compile UI code if Qt and frontend API are available
 #if defined(OBS_UI_ENABLED_X) && defined(OBS_QT_ENABLED_X)
 
-#include "scriptpad-dialog.h"
+#include "script-editor-dialog.h"
 #include "repl-dock.h"
 
 #include <obs-module.h>
@@ -26,7 +26,7 @@
 #include <QMenu>
 
 // Global instances (lazy creation)
-static ScriptpadDialog* g_scriptpadDialog = nullptr;
+static ScriptEditorDialog* g_scriptpadDialog = nullptr;
 
 /**
  * Show the scriptpad dialog
@@ -37,7 +37,7 @@ static void show_scriptpad_dialog()
         auto* mainWindow = static_cast<QMainWindow*>(
             obs_frontend_get_main_window()
         );
-        g_scriptpadDialog = new ScriptpadDialog(mainWindow);
+        g_scriptpadDialog = new ScriptEditorDialog(mainWindow);
     }
     
     g_scriptpadDialog->show();
@@ -67,14 +67,14 @@ extern "C" void obs_node_register_ui(void)
     
     // Add menu item to Tools menu
     auto* action = static_cast<QAction*>(
-        obs_frontend_add_tools_menu_qaction("Node ScriptPad")
+        obs_frontend_add_tools_menu_qaction("Node Script Editor")
     );
     
     if (action) {
         QObject::connect(action, &QAction::triggered, [] {
             show_scriptpad_dialog();
         });
-        obs_log(LOG_INFO, "Registered 'ScriptPad' in Tools menu");
+        obs_log(LOG_INFO, "Registered 'Node Script Editor' in Tools menu");
     }
 
     // Add REPL dock - pass widget directly, OBS creates the dock widget
