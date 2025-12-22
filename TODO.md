@@ -5,3 +5,4 @@
 - Html Canvas like api to draw in the canvas using obs graphics.
 - Impl a ffi module to access non-available binding apis from libobs.
 - Expression support in obs in someway.
+- Use Rhai for expressions?
