@@ -17,16 +17,37 @@ CPMAddPackage(
   URI "gh:nlohmann/json@3.12.0"
   OPTIONS "JSON_BuildTests OFF"
 )
+CPMAddPackage("gh:Curve/channel#v3.0.1")
+CPMAddPackage("gh:Curve/lockpp#v3.2.0")
+CPMAddPackage("gh:Curve/flagpp#v3.1.0")
+CPMAddPackage("gh:Curve/ereignis#v6.2.0")
+CPMAddPackage("gh:Curve/poolparty#v3.0.1")
+#CPMAddPackage("gh:Curve/lambda#v1.0")
+CPMAddPackage("gh:Curve/polo#v1.0.1")
+#CPMAddPackage("gh:Curve/coco#v4.2.0")
+CPMAddPackage("gh:Curve/rebind#v5.3.1")
+CPMAddPackage("gh:Curve/eraser#v2.3.0")
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 find_package(libobs REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
-  fmt::fmt
+#  fmt::fmt
   nlohmann_json::nlohmann_json
 )
+#target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
+#  lambda::ptr
+#  cr::ereignis
+#  cr::lockpp
+#  cr::channel
+#  cr::coco
+#  cr::polo
+#  cr::rebind
+#  cr::eraser
+#  cr::flagpp
+#  cr::poolparty
+#)
 
 if(ENABLE_FRONTEND_API)
   find_package(obs-frontend-api REQUIRED)
@@ -53,6 +74,8 @@ file(GLOB_RECURSE PLUGIN_SOURCES
 )
 # Exclude test executable from plugin sources
 list(FILTER PLUGIN_SOURCES EXCLUDE REGEX "test-.*\\.cpp$")
+list(FILTER PLUGIN_SOURCES EXCLUDE REGEX "test-.*\\.cc$")
+list(FILTER PLUGIN_SOURCES EXCLUDE REGEX "test-.*\\.c$")
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${PLUGIN_SOURCES})
 
@@ -159,6 +182,35 @@ if(BUILD_LIBNODE_TEST)
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_PDB}" "$<TARGET_FILE_DIR:test-libnode>"
         COMMENT "Copying libnode.pdb to test-libnode output"
+      )
+    endif()
+  endif()
+endif()
+
+if(BUILD_LIBNODE_TEST)
+  add_executable(test-libnode-multi src/test-libnode-multi.cc)
+
+  set_target_properties(test-libnode-multi PROPERTIES
+    CXX_STANDARD 20 # C++20 or later required for node 24.3.0
+    CXX_STANDARD_REQUIRED ON
+  )
+
+  target_link_libraries(test-libnode-multi PRIVATE LibNode::LibNode)
+
+  # Copy libnode DLL and PDB for test executable
+  if(WIN32 AND LibNode_DLL)
+    add_custom_command(
+      TARGET test-libnode-multi
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_DLL}" "$<TARGET_FILE_DIR:test-libnode-multi>"
+      COMMENT "Copying libnode.dll to test-libnode-multi output"
+    )
+    if(LibNode_PDB)
+      add_custom_command(
+        TARGET test-libnode-multi
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_PDB}" "$<TARGET_FILE_DIR:test-libnode-multi>"
+        COMMENT "Copying libnode.pdb to test-libnode-multi output"
       )
     endif()
   endif()
