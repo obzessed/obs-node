@@ -10,11 +10,23 @@ option(ENABLE_QT "Use Qt functionality" OFF)
 include(compilerconfig)
 include(defaults)
 include(helpers)
+include(cpm)
+
+CPMAddPackage("gh:fmtlib/fmt#12.1.0")
+CPMAddPackage(
+  URI "gh:nlohmann/json@3.12.0"
+  OPTIONS "JSON_BuildTests OFF"
+)
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 find_package(libobs REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
+  fmt::fmt
+  nlohmann_json::nlohmann_json
+)
 
 if(ENABLE_FRONTEND_API)
   find_package(obs-frontend-api REQUIRED)
