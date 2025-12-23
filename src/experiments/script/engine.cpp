@@ -10,9 +10,14 @@
 #include <thread>
 #include <node/node.h>
 #include <node/uv.h>
-#include <v8.h>
+#include <node/v8.h>
 
 namespace experiments {
+
+
+//=============================================================================
+// ScriptEngine Implementation
+//=============================================================================
 
 ScriptEngine& ScriptEngine::Instance() {
     static ScriptEngine instance;

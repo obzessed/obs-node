@@ -18,8 +18,11 @@ enum class ModuleFormat {
     Unknown     // Auto-detect based on extension or content
 };
 
+
+//=============================================================================
 // Source Map - Represents a JavaScript/TypeScript source map
-// Must be defined before ModuleInfo since std::optional requires complete type
+//=============================================================================
+
 struct SourceMap {
     int version{3};
     std::string file;
@@ -28,14 +31,18 @@ struct SourceMap {
     std::vector<std::string> sources_content;
     std::vector<std::string> names;
     std::string mappings;
-    
+
     bool is_valid() const { return version == 3 && !mappings.empty(); }
-    
+
+    // Generate inline source map URL
     std::string ToInlineUrl() const {
+        // In production, Base64 encode the JSON
         std::string json = ToJson();
+        // Placeholder: would need Base64 encoding
         return "//# sourceMappingURL=data:application/json;base64," + json;
     }
-    
+
+    // Convert to JSON string
     std::string ToJson() const {
         std::ostringstream oss;
         oss << R"({"version":)" << version;
@@ -56,10 +63,13 @@ struct SourceMap {
         oss << R"(],"mappings":")" << mappings << "\"}";
         return oss.str();
     }
-    
-    static std::optional<SourceMap> FromJson(const std::string& /*json*/) {
+
+    // Parse from JSON (simplified)
+    static std::optional<SourceMap> FromJson(const std::string& json) {
+        // Placeholder: would need proper JSON parsing
         SourceMap map;
         map.version = 3;
+        // In production, parse the JSON properly
         return map;
     }
 };
@@ -71,11 +81,15 @@ struct ModuleInfo {
     std::string original_source;        // Original source before transformation
     ModuleFormat format{ModuleFormat::Unknown};
     bool transformed{false};            // Was the source transformed?
-    std::optional<SourceMap> source_map; // Optional source map
-    
+    std::optional<SourceMap> source_map; // Optional source map (forward declaration issue - placeholder)
+
     bool is_valid() const { return !source.empty(); }
     bool was_transformed() const { return transformed && !original_source.empty(); }
 };
+
+//=============================================================================
+// Module Resolver - Abstract base class for path resolution
+//=============================================================================
 
 struct ResolveResult {
     std::string resolved_path;
@@ -84,24 +98,6 @@ struct ResolveResult {
     
     bool is_valid() const { return !resolved_path.empty(); }
     operator bool() const { return is_valid(); }
-};
-
-// Transform Result - Output from a module transformer
-
-struct TransformResult {
-    std::string code;
-    std::optional<SourceMap> source_map;
-    std::vector<std::string> errors;
-    std::vector<std::string> warnings;
-    
-    bool is_ok() const { return errors.empty(); }
-    
-    std::string GetCodeWithInlineSourceMap() const {
-        if (source_map && source_map->is_valid()) {
-            return code + "\n" + source_map->ToInlineUrl();
-        }
-        return code;
-    }
 };
 
 // Helper functions for format detection
@@ -118,12 +114,12 @@ namespace ModuleUtils {
         }
         return ModuleFormat::Unknown;
     }
-    
+
     inline ModuleFormat DetectFormatFromContent(const std::string& source) {
-        if (source.find("import ") != std::string::npos || 
+        if (source.find("import ") != std::string::npos ||
             source.find("export ") != std::string::npos) {
             return ModuleFormat::ESModule;
-        }
+            }
         return ModuleFormat::CommonJS;
     }
 }

@@ -17,6 +17,10 @@
 
 namespace experiments {
 
+//=============================================================================
+// Performance Profiler - CPU, memory, and timing metrics
+//=============================================================================
+
 struct ProfilerEntry {
     std::string name;
     std::string category;
@@ -27,11 +31,11 @@ struct ProfilerEntry {
     size_t memory_after{0};
     size_t call_count{1};
     std::unordered_map<std::string, std::string> metadata;
-    
+
     double DurationMs() const {
         return static_cast<double>(duration.count()) / 1000.0;
     }
-    
+
     std::string ToString() const {
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(3);
@@ -52,22 +56,15 @@ public:
         bool track_memory{true};
         bool track_cpu{true};
         size_t max_entries{10000};
-        std::chrono::microseconds min_duration{0};
+        std::chrono::microseconds min_duration{0};  // Filter small values
     };
-    
-    struct Stats {
-        size_t total_entries{0};
-        double total_time_ms{0};
-        double avg_time_ms{0};
-        double min_time_ms{0};
-        double max_time_ms{0};
-    };
-    
+
     explicit Profiler(Options options = {}) : options_(std::move(options)) {}
-    
+
+    // Start timing
     void Begin(const std::string& name, const std::string& category = "default") {
         if (!options_.enabled) return;
-        
+
         std::lock_guard lock(mutex_);
         ProfilerEntry entry;
         entry.name = name;
@@ -76,51 +73,55 @@ public:
         if (options_.track_memory) {
             entry.memory_before = GetMemoryUsage();
         }
-        
+
         active_[name] = entry;
     }
-    
+
+    // End timing
     void End(const std::string& name) {
         if (!options_.enabled) return;
-        
+
         auto end_time = std::chrono::steady_clock::now();
-        
+
         std::lock_guard lock(mutex_);
         auto it = active_.find(name);
         if (it == active_.end()) return;
-        
+
         ProfilerEntry entry = std::move(it->second);
         active_.erase(it);
-        
+
         entry.end = end_time;
         entry.duration = std::chrono::duration_cast<std::chrono::microseconds>(
             entry.end - entry.start);
-        
+
         if (options_.track_memory) {
             entry.memory_after = GetMemoryUsage();
         }
-        
+
+        // Filter by minimum duration
         if (entry.duration >= options_.min_duration) {
             AddEntry(std::move(entry));
         }
     }
-    
+
+    // Mark a point in time
     void Mark(const std::string& name, const std::string& category = "marker") {
         if (!options_.enabled) return;
-        
+
         ProfilerEntry entry;
         entry.name = name;
         entry.category = category;
         entry.start = std::chrono::steady_clock::now();
         entry.end = entry.start;
         entry.duration = std::chrono::microseconds(0);
-        
+
         std::lock_guard lock(mutex_);
         AddEntry(std::move(entry));
     }
-    
+
+    // Measure a callable
     template<typename F>
-    auto Measure(const std::string& name, F&& func) 
+    auto Measure(const std::string& name, F&& func)
         -> decltype(std::forward<F>(func)()) {
         Begin(name);
         if constexpr (std::is_void_v<decltype(func())>) {
@@ -132,14 +133,15 @@ public:
             return result;
         }
     }
-    
+
+    // Get entries
     std::vector<ProfilerEntry> GetEntries(const std::string& category = "") const {
         std::lock_guard lock(mutex_);
-        
+
         if (category.empty()) {
             return std::vector<ProfilerEntry>(entries_.begin(), entries_.end());
         }
-        
+
         std::vector<ProfilerEntry> filtered;
         for (const auto& entry : entries_) {
             if (entry.category == category) {
@@ -148,14 +150,23 @@ public:
         }
         return filtered;
     }
-    
+
+    // Get summary statistics
+    struct Stats {
+        size_t total_entries{0};
+        double total_time_ms{0};
+        double avg_time_ms{0};
+        double min_time_ms{0};
+        double max_time_ms{0};
+    };
+
     Stats GetStats(const std::string& name = "") const {
         std::lock_guard lock(mutex_);
-        
+
         Stats stats;
         double min = std::numeric_limits<double>::max();
         double max = 0;
-        
+
         for (const auto& entry : entries_) {
             if (name.empty() || entry.name == name) {
                 double ms = entry.DurationMs();
@@ -165,29 +176,31 @@ public:
                 max = std::max(max, ms);
             }
         }
-        
+
         if (stats.total_entries > 0) {
             stats.avg_time_ms = stats.total_time_ms / stats.total_entries;
             stats.min_time_ms = min;
             stats.max_time_ms = max;
         }
-        
+
         return stats;
     }
-    
+
+    // Generate report
     std::string GenerateReport() const {
         std::lock_guard lock(mutex_);
-        
+
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(3);
         oss << "=== Profiler Report ===\n";
         oss << "Total entries: " << entries_.size() << "\n\n";
-        
+
+        // Group by category
         std::unordered_map<std::string, std::vector<const ProfilerEntry*>> by_category;
         for (const auto& entry : entries_) {
             by_category[entry.category].push_back(&entry);
         }
-        
+
         for (const auto& [cat, entries] : by_category) {
             oss << "[" << cat << "]\n";
             double total = 0;
@@ -197,36 +210,38 @@ public:
             }
             oss << "  Total: " << total << "ms\n\n";
         }
-        
+
         return oss.str();
     }
-    
+
+    // Clear all entries
     void Clear() {
         std::lock_guard lock(mutex_);
         entries_.clear();
         active_.clear();
     }
-    
+
     Options& GetOptions() { return options_; }
     bool IsEnabled() const { return options_.enabled; }
     void Enable() { options_.enabled = true; }
     void Disable() { options_.enabled = false; }
-    
+
 private:
     Options options_;
     mutable std::mutex mutex_;
     std::deque<ProfilerEntry> entries_;
     std::unordered_map<std::string, ProfilerEntry> active_;
-    
+
     void AddEntry(ProfilerEntry entry) {
         if (entries_.size() >= options_.max_entries) {
             entries_.pop_front();
         }
         entries_.push_back(std::move(entry));
     }
-    
+
     static size_t GetMemoryUsage() {
-        return 0;  // Platform-specific
+        // Platform-specific memory tracking (placeholder)
+        return 0;
     }
 };
 

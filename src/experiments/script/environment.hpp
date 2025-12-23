@@ -20,7 +20,7 @@
 #include <filesystem>
 
 #include "script_class.hpp"
-#include "../core/errors.hpp"
+#include "../core/error.hpp"
 #include "../core/metrics.hpp"
 #include "../core/events.hpp"
 #include "../config/environment_config.hpp"
@@ -35,7 +35,7 @@ namespace node {
 namespace experiments {
 
 //=============================================================================
-// ScriptEnvironment Declaration
+// ScriptEnvironment - Enhanced with config, metrics, graceful shutdown
 //=============================================================================
 
 class ScriptEnvironment : public std::enable_shared_from_this<ScriptEnvironment> {

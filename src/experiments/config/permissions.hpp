@@ -10,6 +10,10 @@
 
 namespace experiments {
 
+//=============================================================================
+// Script Permissions System
+//=============================================================================
+
 // Individual permission flags
 enum class ScriptPermission : uint32_t {
     None            = 0,
@@ -177,14 +181,6 @@ public:
     
 private:
     ScriptPermission flags_;
-};
-
-// Script Priority
-enum class ScriptPriority {
-    Low = 0,
-    Normal = 1,
-    High = 2,
-    Critical = 3
 };
 
 } // namespace experiments

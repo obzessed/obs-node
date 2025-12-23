@@ -2,7 +2,7 @@
 
 /**
  * audit.hpp - Audit Logging System
- */
+*/
 
 #include <string>
 #include <vector>
@@ -20,26 +20,31 @@
 
 namespace experiments {
 
+
+//=============================================================================
+// Audit Logging - Security and activity logging
+//=============================================================================
+
 enum class AuditEventType {
     // Script lifecycle
     ScriptStart,
     ScriptEnd,
     ScriptError,
     ScriptTimeout,
-    
+
     // Module system
     ModuleLoad,
     ModuleResolve,
     ModuleCompile,
     ModuleCacheHit,
-    
+
     // File system
     FileRead,
     FileWrite,
     FileDelete,
     DirectoryRead,
     DirectoryCreate,
-    
+
     // Network
     NetworkConnect,
     NetworkListen,
@@ -47,22 +52,22 @@ enum class AuditEventType {
     HttpResponse,
     WebSocketOpen,
     WebSocketClose,
-    
+
     // Process
     ProcessSpawn,
     ProcessExit,
     EnvAccess,
-    
+
     // Security
     PermissionDenied,
     SandboxViolation,
     ResourceLimitExceeded,
-    
+
     // API calls
     ApiCall,
     NativeCall,
     EvalCall,
-    
+
     // Workers
     WorkerCreate,
     WorkerTerminate,
@@ -79,8 +84,11 @@ struct AuditEntry {
     int source_line{0};
     bool success{true};
     std::string error_message;
+
+    // Metadata
     std::unordered_map<std::string, std::string> metadata;
-    
+
+    // Pretty print
     std::string ToString() const {
         std::ostringstream oss;
         auto time = std::chrono::system_clock::to_time_t(timestamp);
@@ -93,7 +101,7 @@ struct AuditEntry {
         }
         return oss.str();
     }
-    
+
     static std::string EventTypeName(AuditEventType type) {
         switch (type) {
             case AuditEventType::ScriptStart: return "SCRIPT_START";
@@ -129,16 +137,16 @@ using AuditSinkPtr = std::shared_ptr<AuditSink>;
 class ConsoleAuditSink : public AuditSink {
 public:
     explicit ConsoleAuditSink(bool verbose = false) : verbose_(verbose) {}
-    
+
     void Write(const AuditEntry& entry) override {
-        if (!verbose_ && entry.success) return;
+        if (!verbose_ && entry.success) return;  // Only log failures in non-verbose
         std::cout << "[AUDIT] " << entry.ToString() << std::endl;
     }
-    
+
     void Flush() override {
         std::cout.flush();
     }
-    
+
 private:
     bool verbose_;
 };
@@ -149,21 +157,21 @@ public:
     explicit FileAuditSink(const std::string& path) {
         file_.open(path, std::ios::app);
     }
-    
+
     ~FileAuditSink() {
         if (file_.is_open()) file_.close();
     }
-    
+
     void Write(const AuditEntry& entry) override {
         if (file_.is_open()) {
             file_ << entry.ToString() << "\n";
         }
     }
-    
+
     void Flush() override {
         if (file_.is_open()) file_.flush();
     }
-    
+
 private:
     std::ofstream file_;
 };
@@ -172,15 +180,15 @@ private:
 class CallbackAuditSink : public AuditSink {
 public:
     using Callback = std::function<void(const AuditEntry&)>;
-    
+
     explicit CallbackAuditSink(Callback callback) : callback_(std::move(callback)) {}
-    
+
     void Write(const AuditEntry& entry) override {
         if (callback_) callback_(entry);
     }
-    
+
     void Flush() override {}
-    
+
 private:
     Callback callback_;
 };
@@ -190,77 +198,84 @@ class AuditLogger {
 public:
     struct Options {
         bool enabled{true};
-        bool log_successful{false};
-        bool log_module_loads{true};
-        bool log_file_access{true};
-        bool log_network{true};
-        bool log_api_calls{false};
-        size_t max_entries{10000};
-        bool async_write{true};
+        bool log_successful{false};      // Log successful operations
+        bool log_module_loads{true};     // Log module loading
+        bool log_file_access{true};      // Log file operations
+        bool log_network{true};          // Log network operations
+        bool log_api_calls{false};       // Log all API calls (verbose)
+        size_t max_entries{10000};       // Max in-memory entries
+        bool async_write{true};          // Write to sinks asynchronously
     };
-    
+
     explicit AuditLogger(Options options = {}) : options_(std::move(options)) {}
-    
+
+    // Add a sink
     void AddSink(AuditSinkPtr sink) {
         std::lock_guard lock(mutex_);
         sinks_.push_back(std::move(sink));
     }
-    
+
+    // Log an event
     void Log(AuditEventType type, const std::string& details,
              bool success = true, const std::string& error = "") {
         if (!options_.enabled) return;
         if (success && !options_.log_successful) return;
-        
+
         AuditEntry entry;
         entry.type = type;
         entry.timestamp = std::chrono::system_clock::now();
         entry.details = details;
         entry.success = success;
         entry.error_message = error;
-        
+
         LogEntry(std::move(entry));
     }
-    
+
+    // Log with full details
     void LogEntry(AuditEntry entry) {
         if (!options_.enabled) return;
-        
+
         std::lock_guard lock(mutex_);
-        
+
+        // Write to sinks
         for (auto& sink : sinks_) {
             sink->Write(entry);
         }
-        
+
+        // Store in memory
         if (entries_.size() >= options_.max_entries) {
             entries_.pop_front();
         }
         entries_.push_back(std::move(entry));
     }
-    
+
+    // Convenience methods
     void LogModuleLoad(const std::string& specifier, const std::string& resolved) {
         if (!options_.log_module_loads) return;
         Log(AuditEventType::ModuleLoad, specifier + " -> " + resolved);
     }
-    
+
     void LogFileAccess(AuditEventType type, const std::string& path, bool success,
                        const std::string& error = "") {
         if (!options_.log_file_access) return;
         Log(type, path, success, error);
     }
-    
+
     void LogNetworkAccess(AuditEventType type, const std::string& url, bool success,
                           const std::string& error = "") {
         if (!options_.log_network) return;
         Log(type, url, success, error);
     }
-    
+
     void LogPermissionDenied(const std::string& permission, const std::string& resource) {
         Log(AuditEventType::PermissionDenied, permission + ": " + resource, false);
     }
-    
+
     void LogSandboxViolation(const std::string& violation) {
         Log(AuditEventType::SandboxViolation, violation, false);
     }
-    
+
+    // Get entries
     std::vector<AuditEntry> GetEntries(size_t limit = 100) const {
         std::lock_guard lock(mutex_);
         std::vector<AuditEntry> result;
@@ -271,14 +286,16 @@ public:
         }
         return result;
     }
-    
+
+    // Flush all sinks
     void Flush() {
         std::lock_guard lock(mutex_);
         for (auto& sink : sinks_) {
             sink->Flush();
         }
     }
-    
+
+    // Clear in-memory entries
     void Clear() {
         std::lock_guard lock(mutex_);
         entries_.clear();

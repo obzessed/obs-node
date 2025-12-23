@@ -6,14 +6,21 @@
  */
 
 #include "environment.hpp"
+#include "../core/logger.hpp"
 
 #include <fstream>
 #include <sstream>
 #include <node/node.h>
 #include <node/uv.h>
-#include <v8.h>
+#include <node/v8.h>
 
 namespace experiments {
+
+
+
+//=============================================================================
+// ScriptEnvironment Implementation
+//=============================================================================
 
 ScriptEnvironment::ScriptEnvironment(
     EnvironmentId id,

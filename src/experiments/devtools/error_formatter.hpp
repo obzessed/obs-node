@@ -13,6 +13,10 @@
 
 namespace experiments {
 
+//=============================================================================
+// Error Formatter - Pretty-print errors with source context
+//=============================================================================
+
 struct StackFrame {
     std::string function_name;
     std::string file_path;
@@ -21,7 +25,7 @@ struct StackFrame {
     bool is_native{false};
     bool is_constructor{false};
     bool is_async{false};
-    
+
     std::string ToString() const {
         std::ostringstream oss;
         oss << "    at ";
@@ -30,7 +34,7 @@ struct StackFrame {
         if (!function_name.empty()) {
             oss << function_name << " ";
         }
-        
+
         if (is_native) {
             oss << "(native)";
         } else {
@@ -52,7 +56,7 @@ public:
     struct Options {
         bool colorize{true};
         bool show_source{true};
-        int context_lines{3};
+        int context_lines{3};          // Lines before/after error
         bool show_column_indicator{true};
         bool apply_sourcemap{true};
         size_t max_stack_frames{20};
@@ -62,32 +66,36 @@ public:
         std::string ansi_gray{"\033[90m"};
         std::string ansi_reset{"\033[0m"};
     };
-    
+
     explicit ErrorFormatter(Options options = {}) : options_(std::move(options)) {}
-    
+
+    // Format an error with stack trace
     std::string Format(const std::string& error_type,
                        const std::string& message,
                        const std::vector<StackFrame>& stack) const {
         std::ostringstream oss;
-        
+
+        // Error header
         if (options_.colorize) {
             oss << options_.ansi_red << error_type << ": " << options_.ansi_reset;
         } else {
             oss << error_type << ": ";
         }
         oss << message << "\n";
-        
+
+        // Stack frames
         size_t count = std::min(stack.size(), options_.max_stack_frames);
         for (size_t i = 0; i < count; ++i) {
             const auto& frame = stack[i];
-            
+
             if (options_.colorize) {
                 oss << options_.ansi_gray << frame.ToString() << options_.ansi_reset;
             } else {
                 oss << frame.ToString();
             }
             oss << "\n";
-            
+
+            // Show source snippet for first frame
             if (i == 0 && options_.show_source && !frame.is_native && !frame.file_path.empty()) {
                 std::string snippet = GetSourceSnippet(frame.file_path, frame.line, frame.column);
                 if (!snippet.empty()) {
@@ -95,40 +103,42 @@ public:
                 }
             }
         }
-        
+
         if (stack.size() > options_.max_stack_frames) {
             oss << "    ... " << (stack.size() - options_.max_stack_frames) << " more frames\n";
         }
-        
+
         return oss.str();
     }
-    
+
+    // Get source snippet around a line
     std::string GetSourceSnippet(const std::string& file_path, int line, int column) const {
         std::ifstream file(file_path);
         if (!file.is_open()) return "";
-        
+
         std::vector<std::string> lines;
         std::string line_content;
         while (std::getline(file, line_content)) {
             lines.push_back(line_content);
         }
-        
+
         if (line <= 0 || line > static_cast<int>(lines.size())) return "";
-        
+
         std::ostringstream oss;
         int start = std::max(1, line - options_.context_lines);
         int end = std::min(static_cast<int>(lines.size()), line + options_.context_lines);
-        
+
         for (int i = start; i <= end; ++i) {
             bool is_error_line = (i == line);
             std::string prefix;
-            
+
             if (is_error_line) {
                 prefix = options_.colorize ? (options_.ansi_red + "> " + options_.ansi_reset) : "> ";
             } else {
                 prefix = "  ";
             }
-            
+
+            // Line number
             if (options_.colorize) {
                 oss << options_.ansi_gray;
             }
@@ -136,9 +146,10 @@ public:
             if (options_.colorize) {
                 oss << options_.ansi_reset;
             }
-            
+
             oss << prefix << lines[i - 1] << "\n";
-            
+
+            // Column indicator
             if (is_error_line && options_.show_column_indicator && column > 0) {
                 oss << "     | " << prefix;
                 for (int c = 0; c < column - 1; ++c) oss << " ";
@@ -150,10 +161,11 @@ public:
                 oss << "\n";
             }
         }
-        
+
         return oss.str();
     }
-    
+
+    // Format a simple error message
     std::string FormatSimple(const std::string& error_type, const std::string& message) const {
         if (options_.colorize) {
             return options_.ansi_red + error_type + ": " + options_.ansi_reset + message;

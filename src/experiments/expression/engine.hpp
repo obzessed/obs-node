@@ -23,10 +23,9 @@
 
 namespace experiments {
 
-//=============================================================================
-// Expression - A parsed expression ready for evaluation
-//=============================================================================
 
+
+// Expression - A parsed expression ready for evaluation
 class Expression {
 public:
     Expression() = default;
@@ -34,32 +33,29 @@ public:
         : source_(std::move(source))
         , compiled_(compiled.empty() ? source_ : std::move(compiled))
         , compiled_at_(std::chrono::steady_clock::now()) {}
-    
+
     const std::string& GetSource() const { return source_; }
     const std::string& GetCompiled() const { return compiled_; }
     bool IsValid() const { return !source_.empty(); }
-    
+
     std::chrono::steady_clock::time_point GetCompiledAt() const { return compiled_at_; }
-    
+
 private:
     std::string source_;
     std::string compiled_;
     std::chrono::steady_clock::time_point compiled_at_;
 };
 
-//=============================================================================
 // ExpressionCache - Cache compiled expressions
-//=============================================================================
-
 class ExpressionCache {
 public:
     struct Options {
         size_t max_entries{1000};
         std::chrono::seconds max_age{3600};
     };
-    
+
     explicit ExpressionCache(Options options = {}) : options_(std::move(options)) {}
-    
+
     // Get cached expression
     std::optional<Expression> Get(const std::string& source) {
         std::lock_guard lock(mutex_);
@@ -75,7 +71,7 @@ public:
         ++misses_;
         return std::nullopt;
     }
-    
+
     // Store expression
     void Put(const std::string& source, const Expression& expr) {
         std::lock_guard lock(mutex_);
@@ -91,23 +87,23 @@ public:
         }
         cache_[source] = expr;
     }
-    
+
     // Clear cache
     void Clear() {
         std::lock_guard lock(mutex_);
         cache_.clear();
     }
-    
+
     size_t Size() const {
         std::lock_guard lock(mutex_);
         return cache_.size();
     }
-    
+
     double HitRate() const {
         size_t total = hits_ + misses_;
         return total > 0 ? static_cast<double>(hits_) / total : 0.0;
     }
-    
+
 private:
     Options options_;
     mutable std::mutex mutex_;
@@ -116,23 +112,20 @@ private:
     size_t misses_{0};
 };
 
-//=============================================================================
 // ExpressionResult - Result of expression evaluation
-//=============================================================================
-
 struct ExpressionResult {
     bool success{false};
     ExpressionValue value;
     std::string error;
     std::chrono::microseconds execution_time{0};
-    
+
     static ExpressionResult Success(ExpressionValue val) {
         ExpressionResult r;
         r.success = true;
         r.value = std::move(val);
         return r;
     }
-    
+
     static ExpressionResult Error(const std::string& err) {
         ExpressionResult r;
         r.success = false;
@@ -141,10 +134,7 @@ struct ExpressionResult {
     }
 };
 
-//=============================================================================
 // ExpressionEngine - Recursive descent parser and evaluator
-//=============================================================================
-
 class ExpressionEngine {
 public:
     struct Options {
@@ -153,34 +143,34 @@ public:
         std::chrono::milliseconds timeout{1000};
         size_t max_expression_length{100000};
     };
-    
+
     explicit ExpressionEngine(Options options = {})
         : options_(std::move(options)) {}
-    
+
     // Evaluate an expression string
-    ExpressionResult Evaluate(const std::string& source, 
+    ExpressionResult Evaluate(const std::string& source,
                               ExpressionContext& context) {
         auto start = std::chrono::steady_clock::now();
-        
+
         if (source.empty()) {
             return ExpressionResult::Error("Empty expression");
         }
-        
+
         // Tokenize
         Lexer lexer(source);
         auto tokens = lexer.Tokenize();
         if (tokens.empty()) {
              return ExpressionResult::Success(ExpressionValue());
         }
-        
+
         // Parse and Evaluate
         try {
             Parser parser(std::move(tokens), context, functions_);
             ExpressionValue result = parser.ParseStatementList();
-            
+
             auto end = std::chrono::steady_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            
+
             ExpressionResult r = ExpressionResult::Success(result);
             r.execution_time = duration;
             return r;
@@ -188,29 +178,32 @@ public:
             return ExpressionResult::Error(e.what());
         }
     }
-    
+
     ExpressionResult Evaluate(const std::string& source) {
         ExpressionContext context;
         return Evaluate(source, context);
     }
-    
+
     // Helper for function calls
     ExpressionResult EvaluateWithFunctions(const std::string& source, ExpressionContext& context) {
         return Evaluate(source, context);
     }
-    
+
     // Validate syntax
     bool Validate(const std::string& source, std::string& error) const {
         try {
             Lexer lexer(source);
             auto tokens = lexer.Tokenize();
+            // Basic check: matching braces/parens is done during parsing,
+            // but we can do a dry-run parse here if needed.
+            // For now just checking lexer errors
             return true;
         } catch (const std::exception& e) {
             error = e.what();
             return false;
         }
     }
-    
+
     ExpressionFunctionRegistry& GetFunctions() { return functions_; }
     ExpressionCache& GetCache() { return cache_; }
     Options& GetOptions() { return options_; }
@@ -219,52 +212,52 @@ private:
     Options options_;
     ExpressionFunctionRegistry functions_;
     ExpressionCache cache_;
-    
+
     // --- Lexer ---
     enum class TokenType {
         Eof, Identifier, Number, String, StringInterpolated,
-        Plus, Minus, Multiply, Divide, Equal, NotEqual, 
+        Plus, Minus, Multiply, Divide, Equal, NotEqual,
         Less, LessEqual, Greater, GreaterEqual,
         Assign, LParen, RParen, LBrace, RBrace, Comma, Semicolon,
-        KeywordLet, KeywordConst, KeywordIf, KeywordElse, 
+        KeywordLet, KeywordConst, KeywordIf, KeywordElse,
         KeywordTrue, KeywordFalse, KeywordNull,
         InterpolationStart // ${
     };
-    
+
     struct Token {
         TokenType type;
         std::string text;
         size_t line{1};
         size_t column{1};
     };
-    
+
     class Lexer {
     public:
         explicit Lexer(std::string source) : source_(std::move(source)) {}
-        
+
         std::vector<Token> Tokenize() {
             std::vector<Token> tokens;
             while (!IsAtEnd()) {
                 StartToken();
                 char c = Advance();
-                
+
                 if (isspace(c)) {
                     if (c == '\n') { line_++; col_ = 1; }
                     else if (c == '\r') { /* ignore CR */ }
                     else { /* ignore other space */ }
                     continue;
                 }
-                
+
                 if (isalpha(c) || c == '_') {
                     tokens.push_back(Identifier());
                     continue;
                 }
-                
+
                 if (isdigit(c)) {
                     tokens.push_back(Number());
                     continue;
                 }
-                
+
                 switch (c) {
                     case '(': AddToken(tokens, TokenType::LParen); break;
                     case ')': AddToken(tokens, TokenType::RParen); break;
@@ -275,17 +268,17 @@ private:
                     case '+': AddToken(tokens, TokenType::Plus); break;
                     case '-': AddToken(tokens, TokenType::Minus); break;
                     case '*': AddToken(tokens, TokenType::Multiply); break;
-                    case '/': 
+                    case '/':
                         if (Match('/')) { // Comment
                             while (Peek() != '\n' && !IsAtEnd()) Advance();
                         } else {
-                            AddToken(tokens, TokenType::Divide); 
+                            AddToken(tokens, TokenType::Divide);
                         }
                         break;
                     case '=': AddToken(tokens, Match('=') ? TokenType::Equal : TokenType::Assign); break;
-                    case '!': 
-                        if (Match('=')) AddToken(tokens, TokenType::NotEqual); 
-                        else throw std::runtime_error("Unexpected character '!'"); 
+                    case '!':
+                        if (Match('=')) AddToken(tokens, TokenType::NotEqual);
+                        else throw std::runtime_error("Unexpected character '!'");
                         break;
                     case '<': AddToken(tokens, Match('=') ? TokenType::LessEqual : TokenType::Less); break;
                     case '>': AddToken(tokens, Match('=') ? TokenType::GreaterEqual : TokenType::Greater); break;
@@ -300,47 +293,47 @@ private:
             tokens.push_back({TokenType::Eof, "", line_, col_});
             return tokens;
         }
-        
+
     private:
         std::string source_;
         size_t current_{0};
         size_t start_{0};
         size_t line_{1};
         size_t col_{1};
-        
+
         bool IsAtEnd() const { return current_ >= source_.length(); }
-        
-        char Advance() { 
-            col_++; 
-            return source_[current_++]; 
+
+        char Advance() {
+            col_++;
+            return source_[current_++];
         }
-        
+
         char Peek() const {
             if (IsAtEnd()) return '\0';
             return source_[current_];
         }
-        
+
         char PeekNext() const {
             if (current_ + 1 >= source_.length()) return '\0';
             return source_[current_ + 1];
         }
-        
+
         bool Match(char expected) {
             if (IsAtEnd() || source_[current_] != expected) return false;
             current_++; col_++;
             return true;
         }
-        
+
         void StartToken() { start_ = current_; }
-        
+
         void AddToken(std::vector<Token>& tokens, TokenType type) {
             std::string text = source_.substr(start_, current_ - start_);
             tokens.push_back({type, text, line_, col_ - text.length()});
         }
-        
+
         Token Identifier() {
             while (isalnum(Peek()) || Peek() == '_') Advance();
-            
+
             std::string text = source_.substr(start_, current_ - start_);
             TokenType type = TokenType::Identifier;
             if (text == "let") type = TokenType::KeywordLet;
@@ -350,10 +343,10 @@ private:
             else if (text == "true") type = TokenType::KeywordTrue;
             else if (text == "false") type = TokenType::KeywordFalse;
             else if (text == "null") type = TokenType::KeywordNull;
-            
+
             return {type, text, line_, col_ - text.length()};
         }
-        
+
         Token Number() {
             while (isdigit(Peek())) Advance();
             if (Peek() == '.' && isdigit(PeekNext())) {
@@ -363,7 +356,7 @@ private:
             std::string text = source_.substr(start_, current_ - start_);
             return {TokenType::Number, text, line_, col_ - text.length()};
         }
-        
+
         Token String(char quote) {
             std::string value;
             while (Peek() != quote && !IsAtEnd()) {
@@ -374,20 +367,20 @@ private:
                 }
                 value += Advance();
             }
-            
+
             if (IsAtEnd()) throw std::runtime_error("Unterminated string");
             Advance(); // Closing quote
-            
+
             return {TokenType::String, value, line_, col_ - value.length() - 2};
         }
     };
-    
+
     // --- Parser ---
     class Parser {
     public:
         Parser(std::vector<Token> tokens, ExpressionContext& context, const ExpressionFunctionRegistry& functions)
             : tokens_(std::move(tokens)), context_(context), functions_(functions) {}
-            
+
         ExpressionValue ParseStatementList() {
             ExpressionValue last_val;
             while (!IsAtEnd()) {
@@ -395,7 +388,7 @@ private:
             }
             return last_val;
         }
-        
+
         ExpressionValue ParseStatement() {
             if (Match(TokenType::KeywordLet)) {
                 return ParseDeclaration(false);
@@ -404,12 +397,12 @@ private:
             } else if (Match(TokenType::Semicolon)) {
                 return ExpressionValue(); // Empty statement
             }
-            
+
             ExpressionValue val = ParseExpression();
             Match(TokenType::Semicolon); // Consume optional semicolon
             return val;
         }
-        
+
         ExpressionValue ParseDeclaration(bool is_const) {
             Token name = Consume(TokenType::Identifier, "Expected variable name");
             ExpressionValue init;
@@ -418,43 +411,52 @@ private:
             } else if (is_const) {
                 throw std::runtime_error("Const declarations must have an initializer");
             }
-            
+
             if (!context_.Declare(name.text, init, is_const)) {
                 throw std::runtime_error("Variable '" + name.text + "' already declared");
             }
             Match(TokenType::Semicolon);
             return init; // Declaration evaluates to init value
         }
-        
+
         ExpressionValue ParseExpression() {
             return ParseAssignment();
         }
-        
+
         ExpressionValue ParseAssignment() {
+            // Simplified assignment handling:
+            // Since we can't easily peek arbitrary lookahead for "IDENT = ...",
+            // and we want to reuse ParseLogicalOr, we have to handle checking if the
+            // result of Evaluate is an Assignable Reference.
+            // But here we are just evaluating.
+            // Alternative: check if current token is Identifier and next is Assign
+
             if (Check(TokenType::Identifier) && PeekNext().type == TokenType::Assign) {
                 Token name = Advance(); // Eat identifier
                 Advance(); // Eat '='
                 ExpressionValue value = ParseAssignment(); // Recursive for right-associativity
-                
+
                 if (!context_.Set(name.text, value)) {
                      throw std::runtime_error("Cannot assign to const or undeclared variable: " + name.text);
                 }
                 return value;
             }
-            
+
             return ParseLogicalOr();
         }
-        
+
         ExpressionValue ParseLogicalOr() {
              ExpressionValue left = ParseLogicalAnd();
+             // TODO: 'or' keyword or '||' operator support
              return left;
         }
-        
+
         ExpressionValue ParseLogicalAnd() {
             ExpressionValue left = ParseEquality();
+            // TODO: 'and' keyword or '&&' operator support
             return left;
         }
-        
+
         ExpressionValue ParseEquality() {
             ExpressionValue left = ParseAdditive();
             while (Match(TokenType::Equal) || Match(TokenType::NotEqual)) {
@@ -465,7 +467,7 @@ private:
             }
             return left;
         }
-        
+
         ExpressionValue ParseAdditive() {
             ExpressionValue left = ParseMultiplicative();
             while (Match(TokenType::Plus) || Match(TokenType::Minus)) {
@@ -476,7 +478,7 @@ private:
             }
             return left;
         }
-        
+
         ExpressionValue ParseMultiplicative() {
             ExpressionValue left = ParseUnary();
             while (Match(TokenType::Multiply) || Match(TokenType::Divide)) {
@@ -491,19 +493,20 @@ private:
             }
             return left;
         }
-        
+
         ExpressionValue ParseUnary() {
             if (Match(TokenType::Minus)) return ExpressionValue(-ParseUnary().AsNumber());
             if (Match(TokenType::Plus)) return ParseUnary(); // +x is just x
             return ParsePrimary();
         }
-        
+
         ExpressionValue ParsePrimary() {
             if (Match(TokenType::KeywordTrue)) return ExpressionValue(true);
             if (Match(TokenType::KeywordFalse)) return ExpressionValue(false);
             if (Match(TokenType::KeywordNull)) return ExpressionValue(nullptr);
             if (Match(TokenType::Number)) return ExpressionValue(std::stod(Previous().text));
             if (Match(TokenType::String)) {
+                // Return string with interpolation processed
                 return ExpressionValue(ProcessString(Previous().text));
             }
             

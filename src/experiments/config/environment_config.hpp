@@ -17,6 +17,10 @@ namespace experiments {
 class ModuleLoader;
 using ModuleLoaderPtr = std::shared_ptr<ModuleLoader>;
 
+//=============================================================================
+// Environment Configuration
+//=============================================================================
+
 struct EnvironmentConfig {
     std::string name{"Environment"};
     

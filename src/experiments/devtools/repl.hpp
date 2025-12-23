@@ -12,13 +12,17 @@
 
 namespace experiments {
 
+//=============================================================================
+// REPL - Interactive Read-Eval-Print Loop
+//=============================================================================
+
 struct ReplResult {
     bool success{false};
-    std::string value;
-    std::string type;
-    std::string error;
+    std::string value;        // Result value as string
+    std::string type;         // Type of the result
+    std::string error;        // Error message if failed
     std::chrono::microseconds execution_time{0};
-    
+
     static ReplResult Success(const std::string& val, const std::string& t = "any") {
         ReplResult r;
         r.success = true;
@@ -26,7 +30,7 @@ struct ReplResult {
         r.type = t;
         return r;
     }
-    
+
     static ReplResult Error(const std::string& err) {
         ReplResult r;
         r.success = false;
@@ -47,14 +51,22 @@ public:
         bool show_types{false};
         bool strict_mode{false};
     };
-    
+
     explicit Repl(Options options = {}) : options_(std::move(options)) {}
-    
+
+    // Evaluate a line of code
     ReplResult Evaluate(const std::string& code) {
         auto start = std::chrono::steady_clock::now();
+
+        // Add to history
         AddToHistory(code);
-        
+
+        // Placeholder: In real implementation, would use V8 to evaluate
         ReplResult result;
+        result.execution_time = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start);
+
+        // Simple evaluation simulation
         if (code.find("throw") != std::string::npos) {
             result = ReplResult::Error("Simulated error");
         } else if (code.find("undefined") != std::string::npos) {
@@ -68,17 +80,19 @@ public:
         } else {
             result = ReplResult::Success("'" + code + "'", "string");
         }
-        
+
         result.execution_time = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start);
         return result;
     }
-    
+
+    // Check if code is complete (for multi-line input)
     bool IsComplete(const std::string& code) const {
+        // Count brackets and braces
         int braces = 0, brackets = 0, parens = 0;
         bool in_string = false;
         char string_char = 0;
-        
+
         for (size_t i = 0; i < code.size(); ++i) {
             char c = code[i];
             if (in_string) {
@@ -97,12 +111,15 @@ public:
                 else if (c == ')') parens--;
             }
         }
-        
+
         return !in_string && braces == 0 && brackets == 0 && parens == 0;
     }
-    
+
+    // Tab completion
     std::vector<std::string> Complete(const std::string& partial) const {
         std::vector<std::string> completions;
+
+        // Built-in globals
         std::vector<std::string> globals = {
             "console", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
             "Promise", "Array", "Object", "String", "Number", "Boolean", "Date",
@@ -110,20 +127,23 @@ public:
             "Symbol", "Proxy", "Reflect", "Buffer", "process", "require", "module",
             "exports", "global", "globalThis", "__dirname", "__filename"
         };
-        
+
+        // Add context variables
         for (const auto& [name, _] : context_) {
             globals.push_back(name);
         }
-        
+
+        // Filter by prefix
         for (const auto& g : globals) {
             if (g.starts_with(partial)) {
                 completions.push_back(g);
             }
         }
-        
+
         return completions;
     }
-    
+
+    // History navigation
     void AddToHistory(const std::string& line) {
         if (!line.empty() && (history_.empty() || history_.back() != line)) {
             history_.push_back(line);
@@ -133,7 +153,7 @@ public:
         }
         history_pos_ = history_.size();
     }
-    
+
     std::optional<std::string> GetPreviousHistory() {
         if (history_pos_ > 0) {
             --history_pos_;
@@ -141,7 +161,7 @@ public:
         }
         return std::nullopt;
     }
-    
+
     std::optional<std::string> GetNextHistory() {
         if (history_pos_ < history_.size() - 1) {
             ++history_pos_;
@@ -150,25 +170,29 @@ public:
         history_pos_ = history_.size();
         return std::nullopt;
     }
-    
+
+    // Context management
     void SetContext(const std::string& name, const std::string& value) {
         context_[name] = value;
     }
-    
+
     std::optional<std::string> GetContext(const std::string& name) const {
         auto it = context_.find(name);
         if (it != context_.end()) return it->second;
         return std::nullopt;
     }
-    
+
     void ClearContext() { context_.clear(); }
-    
+
+    // Get prompt
     std::string GetPrompt(bool continuation = false) const {
         return continuation ? options_.continuation_prompt : options_.prompt;
     }
-    
+
+    // History access
     const std::vector<std::string>& GetHistory() const { return history_; }
     void ClearHistory() { history_.clear(); history_pos_ = 0; }
+
     Options& GetOptions() { return options_; }
     
 private:

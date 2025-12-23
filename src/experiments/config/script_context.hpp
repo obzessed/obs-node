@@ -12,6 +12,18 @@
 
 namespace experiments {
 
+// Script Priority
+enum class ScriptPriority {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+    Critical = 3
+};
+
+//=============================================================================
+// Script Context (shared data)
+//=============================================================================
+
 class ScriptContext {
 public:
     void Set(const std::string& key, const std::string& value) {
