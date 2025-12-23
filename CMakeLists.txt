@@ -28,6 +28,11 @@ CPMAddPackage("gh:Curve/polo#v1.0.1")
 CPMAddPackage("gh:Curve/rebind#v5.3.1")
 CPMAddPackage("gh:Curve/eraser#v2.3.0")
 
+# Define NOMINMAX on Windows to prevent min/max macro conflicts
+if(WIN32)
+  add_compile_definitions(NOMINMAX)
+endif()
+
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 find_package(libobs REQUIRED)

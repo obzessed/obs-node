@@ -1,10 +1,6 @@
 /**
  * test-libnode-multi.cc - Enhanced ScriptEngine Architecture
  */
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#endif
 
 #include <iostream>
 #include <iomanip>
