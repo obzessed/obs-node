@@ -268,3 +268,114 @@ private:
 };
 
 } // namespace experiments
+
+// Include transformers for TransformingLoader
+#include "transformers.hpp"
+
+namespace experiments {
+
+//=============================================================================
+// Transforming Loader - Wraps a loader and applies transformations
+//=============================================================================
+
+class TransformingLoader : public ModuleLoader {
+public:
+    TransformingLoader(ModuleLoaderPtr inner_loader, ModuleTransformerPtr transformer)
+        : inner_loader_(std::move(inner_loader))
+        , transformer_(std::move(transformer)) {}
+    
+    std::optional<ModuleInfo> Load(const std::string& resolved_path) override {
+        // First, load the module using the inner loader
+        auto module_info = inner_loader_->Load(resolved_path);
+        if (!module_info) return std::nullopt;
+        
+        // Check if we should transform this module
+        if (transformer_ && transformer_->ShouldTransform(resolved_path)) {
+            auto transform_result = transformer_->Transform(
+                module_info->source, 
+                resolved_path, 
+                module_info->format
+            );
+            
+            if (transform_result.is_ok()) {
+                // Store original and apply transformation
+                module_info->original_source = module_info->source;
+                module_info->source = transform_result.code;
+                module_info->transformed = true;
+                
+                // Store source map if available
+                if (transform_result.source_map) {
+                    module_info->source_map = transform_result.source_map;
+                }
+                
+                // Update format if TypeScript was transformed to JavaScript
+                if (resolved_path.ends_with(".ts") || 
+                    resolved_path.ends_with(".tsx") ||
+                    resolved_path.ends_with(".mts") ||
+                    resolved_path.ends_with(".cts")) {
+                    // After transformation, treat as JS
+                    if (resolved_path.ends_with(".mts")) {
+                        module_info->format = ModuleFormat::ESModule;
+                    } else if (resolved_path.ends_with(".cts")) {
+                        module_info->format = ModuleFormat::CommonJS;
+                    }
+                }
+                
+                LOG_DEBUG("TransformingLoader", "Transformed: " + resolved_path);
+            } else {
+                // Log transformation errors
+                for (const auto& error : transform_result.errors) {
+                    LOG_ERROR("TransformingLoader", "Transform error: " + error);
+                }
+                // Return original code on error (or could return nullopt)
+            }
+        }
+        
+        return module_info;
+    }
+    
+    bool CanLoad(const std::string& resolved_path) const override {
+        return inner_loader_->CanLoad(resolved_path);
+    }
+    
+    std::string GetName() const override { 
+        return "TransformingLoader(" + inner_loader_->GetName() + ")"; 
+    }
+    
+    // Set/replace transformer
+    void SetTransformer(ModuleTransformerPtr transformer) {
+        transformer_ = std::move(transformer);
+    }
+    
+    // Add to transformer chain (creates chain if needed)
+    void AddTransformer(ModuleTransformerPtr transformer) {
+        if (!transformer_) {
+            transformer_ = std::move(transformer);
+        } else {
+            // Check if already a chain
+            auto chain = std::dynamic_pointer_cast<TransformerChain>(transformer_);
+            if (chain) {
+                chain->AddTransformer(std::move(transformer));
+            } else {
+                // Create a new chain with existing + new
+                auto new_chain = std::make_shared<TransformerChain>();
+                new_chain->AddTransformer(std::move(transformer_));
+                new_chain->AddTransformer(std::move(transformer));
+                transformer_ = new_chain;
+            }
+        }
+    }
+    
+    // Configure source map behavior
+    void SetInlineSourceMaps(bool inline_) { inline_source_maps_ = inline_; }
+    
+    // Get the inner loader
+    ModuleLoaderPtr GetInnerLoader() const { return inner_loader_; }
+    
+private:
+    ModuleLoaderPtr inner_loader_;
+    ModuleTransformerPtr transformer_;
+    bool inline_source_maps_{true};
+};
+
+} // namespace experiments

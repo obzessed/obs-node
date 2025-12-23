@@ -11,9 +11,6 @@
 
 namespace experiments {
 
-// Forward declaration
-struct SourceMap;
-
 enum class ModuleFormat {
     CommonJS,   // require()
     ESModule,   // import/export
@@ -21,29 +18,8 @@ enum class ModuleFormat {
     Unknown     // Auto-detect based on extension or content
 };
 
-struct ModuleInfo {
-    std::string specifier;              // Original import/require specifier
-    std::string resolved_path;          // Resolved path/URL
-    std::string source;                 // Module source code (possibly transformed)
-    std::string original_source;        // Original source before transformation
-    ModuleFormat format{ModuleFormat::Unknown};
-    bool transformed{false};            // Was the source transformed?
-    std::optional<SourceMap> source_map; // Optional source map
-    
-    bool is_valid() const { return !source.empty(); }
-    bool was_transformed() const { return transformed && !original_source.empty(); }
-};
-
-struct ResolveResult {
-    std::string resolved_path;
-    std::string resolver_name;  // Which resolver found it
-    bool is_virtual{false};     // Is this a virtual module?
-    
-    bool is_valid() const { return !resolved_path.empty(); }
-    operator bool() const { return is_valid(); }
-};
-
 // Source Map - Represents a JavaScript/TypeScript source map
+// Must be defined before ModuleInfo since std::optional requires complete type
 struct SourceMap {
     int version{3};
     std::string file;
@@ -88,7 +64,30 @@ struct SourceMap {
     }
 };
 
+struct ModuleInfo {
+    std::string specifier;              // Original import/require specifier
+    std::string resolved_path;          // Resolved path/URL
+    std::string source;                 // Module source code (possibly transformed)
+    std::string original_source;        // Original source before transformation
+    ModuleFormat format{ModuleFormat::Unknown};
+    bool transformed{false};            // Was the source transformed?
+    std::optional<SourceMap> source_map; // Optional source map
+    
+    bool is_valid() const { return !source.empty(); }
+    bool was_transformed() const { return transformed && !original_source.empty(); }
+};
+
+struct ResolveResult {
+    std::string resolved_path;
+    std::string resolver_name;  // Which resolver found it
+    bool is_virtual{false};     // Is this a virtual module?
+    
+    bool is_valid() const { return !resolved_path.empty(); }
+    operator bool() const { return is_valid(); }
+};
+
 // Transform Result - Output from a module transformer
+
 struct TransformResult {
     std::string code;
     std::optional<SourceMap> source_map;
