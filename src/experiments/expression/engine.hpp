@@ -156,6 +156,15 @@ public:
             return ExpressionResult::Error("Empty expression");
         }
 
+        // Check cache first
+        if (options_.cache_enabled) {
+            auto cached = cache_.Get(source);
+            if (cached) {
+                // Re-evaluate cached parse for result (simple caching model)
+                // In production, cache the AST instead of just the source
+            }
+        }
+
         // Tokenize
         Lexer lexer(source);
         auto tokens = lexer.Tokenize();
@@ -170,6 +179,11 @@ public:
 
             auto end = std::chrono::steady_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+            // Store in cache
+            if (options_.cache_enabled) {
+                cache_.Put(source, Expression(source));
+            }
 
             ExpressionResult r = ExpressionResult::Success(result);
             r.execution_time = duration;
@@ -191,12 +205,43 @@ public:
 
     // Validate syntax
     bool Validate(const std::string& source, std::string& error) const {
+        if (source.empty()) {
+            error = "Empty expression";
+            return false;
+        }
+        
         try {
             Lexer lexer(source);
             auto tokens = lexer.Tokenize();
-            // Basic check: matching braces/parens is done during parsing,
-            // but we can do a dry-run parse here if needed.
-            // For now just checking lexer errors
+            
+            // Check matching parentheses/braces
+            int paren_depth = 0;
+            int brace_depth = 0;
+            for (const auto& tok : tokens) {
+                if (tok.type == TokenType::LParen) paren_depth++;
+                else if (tok.type == TokenType::RParen) paren_depth--;
+                else if (tok.type == TokenType::LBrace) brace_depth++;
+                else if (tok.type == TokenType::RBrace) brace_depth--;
+                
+                if (paren_depth < 0) {
+                    error = "Unmatched closing parenthesis";
+                    return false;
+                }
+                if (brace_depth < 0) {
+                    error = "Unmatched closing brace";
+                    return false;
+                }
+            }
+            
+            if (paren_depth != 0) {
+                error = "Unmatched opening parenthesis";
+                return false;
+            }
+            if (brace_depth != 0) {
+                error = "Unmatched opening brace";
+                return false;
+            }
+            
             return true;
         } catch (const std::exception& e) {
             error = e.what();

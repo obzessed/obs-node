@@ -196,6 +196,9 @@ int main()
 	engine.GetMainEnvironment()->Execute(userAction);  // High
 	engine.GetMainEnvironment()->Execute(emergency);   // Critical
 
+	// Small delay to ensure all scripts are in the priority queue before processing
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
 	// Wait for all
 	emergency->Wait(std::chrono::seconds(5));
 	userAction->Wait(std::chrono::seconds(5));
@@ -1126,6 +1129,9 @@ int main()
 	    // Check has
 	    bool has_ok = cache.Has("virtual:test") && !cache.Has("nonexistent");
 
+	    // Trigger a cache miss (Has() doesn't count misses, only Get() does)
+	    cache.Get("nonexistent");
+
 	    // Invalidate
 	    cache.Invalidate("virtual:test");
 	    bool invalidate_ok = !cache.Has("virtual:test");
@@ -1912,10 +1918,10 @@ int main()
 	    bool clamp_ok = r4.success && r4.value.AsNumber() == 10;
 
 	    // String functions
-	    auto r5 = engine.Evaluate("strlen(hello)");
+	    auto r5 = engine.Evaluate("strlen('hello')");
 	    bool strlen_ok = r5.success && r5.value.AsNumber() == 5;
 
-	    auto r6 = engine.Evaluate("upper(hello)");
+	    auto r6 = engine.Evaluate("upper('hello')");
 	    bool upper_ok = r6.success && r6.value.AsString() == "HELLO";
 
 	    bool passed = abs_ok && max_ok && min_ok && clamp_ok && strlen_ok && upper_ok;

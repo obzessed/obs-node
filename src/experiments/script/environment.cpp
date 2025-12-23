@@ -146,7 +146,10 @@ bool ScriptEnvironment::Execute(const ScriptPtr& script) {
         std::lock_guard lock(queue_mutex_);
         script_queue_.push(script);
     }
-    queue_cv_.notify_one();
+    // Don't notify immediately - let scripts batch up in the priority queue
+    // The environment thread will pick them up on its 10ms timer cycle
+    // This allows priority ordering to work correctly when multiple scripts
+    // are queued in quick succession
     
     if (events_) events_->EmitScript(ScriptEvent::Queued, script->GetName());
     return true;

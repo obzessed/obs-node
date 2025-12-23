@@ -238,6 +238,9 @@ private:
 using ScriptPtr = std::shared_ptr<Script>;
 
 // Priority comparator for queue
+// std::priority_queue is a max-heap: element with highest priority is at top
+// Comparator returns true if 'a' has LOWER priority than 'b' (a should come after b)
+// With Critical=3 > High=2 > Normal=1 > Low=0, we use a < b
 struct ScriptPriorityCompare {
     bool operator()(const ScriptPtr& a, const ScriptPtr& b) const {
         return static_cast<int>(a->GetPriority()) < static_cast<int>(b->GetPriority());
