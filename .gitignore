@@ -6,6 +6,7 @@
 !/build-aux
 !/bindings
 !/cmake
+!/assets
 !/data
 !/docs
 !/src
@@ -15,6 +16,7 @@
 !.gitignore
 !buildspec.json
 !libnode.json
+!resources.qrc
 !CMakeLists.txt
 !CMakePresets.json
 !LICENSE

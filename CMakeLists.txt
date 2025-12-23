@@ -78,6 +78,9 @@ list(FILTER PLUGIN_SOURCES EXCLUDE REGEX "test-.*\\.cc$")
 list(FILTER PLUGIN_SOURCES EXCLUDE REGEX "test-.*\\.c$")
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${PLUGIN_SOURCES})
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+  resources.qrc
+)
 
 # Enable C++20 for Node.js embedding API (required by Node.js 24.x)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
@@ -158,8 +161,15 @@ endif()
 # ============================================================================
 option(BUILD_LIBNODE_TEST "Build standalone libnode test executable" ON)
 
+file(GLOB_RECURSE EXPERIMENT_SOURCES
+    src/experiments/*.c
+    src/experiments/*.cc
+    src/experiments/*.cpp
+)
+
 if(BUILD_LIBNODE_TEST)
   add_executable(test-libnode src/test-libnode.cpp)
+  target_sources(test-libnode PRIVATE ${EXPERIMENT_SOURCES})
   
   set_target_properties(test-libnode PROPERTIES
     CXX_STANDARD 20 # C++20 or later required for node 24.3.0
@@ -189,6 +199,7 @@ endif()
 
 if(BUILD_LIBNODE_TEST)
   add_executable(test-libnode-multi src/test-libnode-multi.cc)
+  target_sources(test-libnode-multi PRIVATE ${EXPERIMENT_SOURCES})
 
   set_target_properties(test-libnode-multi PROPERTIES
     CXX_STANDARD 20 # C++20 or later required for node 24.3.0
