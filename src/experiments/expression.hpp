@@ -8,7 +8,10 @@
  * - ExpressionContext: Variable scope management
  * - ExpressionFunctionRegistry: Built-in functions
  * - ExpressionEngine: Parser and evaluator
+ * - ReactiveValue, ReactiveExpression: Reactive programming support
  */
 
 #include "expression/types.hpp"
 #include "expression/engine.hpp"
+#include "expression/reactive.hpp"
+

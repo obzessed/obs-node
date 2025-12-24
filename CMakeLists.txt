@@ -27,7 +27,6 @@ CPMAddPackage(
 #CPMAddPackage("gh:Curve/coco#v4.2.0")
 #CPMAddPackage("gh:Curve/rebind#v5.3.1")
 #CPMAddPackage("gh:Curve/eraser#v2.3.0")
-CPMAddPackage("gh:catchorg/Catch2@3.11.0")
 
 # Define NOMINMAX on Windows to prevent min/max macro conflicts
 if(WIN32)
@@ -166,7 +165,8 @@ endif()
 # Testing with CTest and Catch2
 # ============================================================================
 option(BUILD_TESTS "Build tests" ON)
-option(BUILD_LIBNODE_TEST "Build standalone libnode test executable" ON)
+option(BUILD_LEGACY_TESTS "Build standalone libnode test executable" ON)
+option(BUILD_BENCHMARKS "Build benchmark tests" ON)
 
 file(GLOB_RECURSE EXPERIMENT_SOURCES
     src/experiments/*.c
@@ -174,79 +174,91 @@ file(GLOB_RECURSE EXPERIMENT_SOURCES
     src/experiments/*.cpp
 )
 
-if(BUILD_TESTS)
+if(BUILD_TESTS OR BUILD_BENCHMARKS)
   enable_testing()
-  include(CTest)
-  
+
+  # test dependencies
+  CPMAddPackage("gh:catchorg/Catch2@3.11.0")
+
   # Include Catch2's CMake helpers for test discovery
+  # for the below included Catch cmake module
   list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
-  include(Catch)
+
+  include(CTest)
+  include(Catch) # for: catch_discover_tests()
 endif()
 
-if(BUILD_LIBNODE_TEST)
-  # Legacy test executable (non-Catch2)
-  add_executable(test-libnode tests/test-libnode.cpp)
-  target_sources(test-libnode PRIVATE ${EXPERIMENT_SOURCES})
-  
-  set_target_properties(test-libnode PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED ON
-  )
-  
-  target_link_libraries(test-libnode PRIVATE LibNode::LibNode)
-  
-  # Copy libnode DLL and PDB for test executable
-  if(WIN32 AND LibNode_DLL)
-    add_custom_command(
-      TARGET test-libnode
-      POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_DLL}" "$<TARGET_FILE_DIR:test-libnode>"
-      COMMENT "Copying libnode.dll to test-libnode output"
-    )
-    if(LibNode_PDB)
-      add_custom_command(
-        TARGET test-libnode
-        POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_PDB}" "$<TARGET_FILE_DIR:test-libnode>"
-        COMMENT "Copying libnode.pdb to test-libnode output"
-      )
-    endif()
-  endif()
+# Old standalone libnode test (if exists)
+if(BUILD_LEGACY_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test-libnode.cpp")
+  set(LIBNODE_SIMPLE_TEST "test-libnode-simple")
 
-  # Legacy complex test executable (non-Catch2)
-  # TODO: legacy tests
-  add_executable(test-libnode-multi tests/test-libnode-multi.cc)
-  target_sources(test-libnode-multi PRIVATE ${EXPERIMENT_SOURCES})
-  target_include_directories(test-libnode-multi PRIVATE src)
+  add_executable(${LIBNODE_SIMPLE_TEST} tests/test-libnode.cpp)
+  target_include_directories(${LIBNODE_SIMPLE_TEST} PRIVATE src)
 
-  set_target_properties(test-libnode-multi PROPERTIES
+  set_target_properties(${LIBNODE_SIMPLE_TEST} PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
   )
 
-  target_link_libraries(test-libnode-multi PRIVATE LibNode::LibNode)
+  target_link_libraries(${LIBNODE_SIMPLE_TEST} PRIVATE LibNode::LibNode)
 
   # Copy libnode DLL and PDB for test executable
   if(WIN32 AND LibNode_DLL)
     add_custom_command(
-      TARGET test-libnode-multi
+      TARGET ${LIBNODE_SIMPLE_TEST}
       POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_DLL}" "$<TARGET_FILE_DIR:test-libnode-multi>"
-      COMMENT "Copying libnode.dll to test-libnode-multi output"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_DLL}" "$<TARGET_FILE_DIR:${LIBNODE_SIMPLE_TEST}>"
+      COMMENT "Copying libnode.dll to ${LIBNODE_SIMPLE_TEST} output"
     )
     if(LibNode_PDB)
       add_custom_command(
-        TARGET test-libnode-multi
+        TARGET ${LIBNODE_SIMPLE_TEST}
         POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_PDB}" "$<TARGET_FILE_DIR:test-libnode-multi>"
-        COMMENT "Copying libnode.pdb to test-libnode-multi output"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_PDB}" "$<TARGET_FILE_DIR:${LIBNODE_SIMPLE_TEST}>"
+        COMMENT "Copying libnode.pdb to ${LIBNODE_SIMPLE_TEST} output"
       )
     endif()
   endif()
+endif()
 
-  # --------------------------------------------------------------------------------------------------------------------
+# Legacy multi test (if exists)
+if(BUILD_LEGACY_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test-libnode-multi.cc")
+  set(LIBNODE_MULTI_TEST "test-libnode-multi")
 
-  # Catch2-based test executable
+  add_executable(${LIBNODE_MULTI_TEST} tests/test-libnode-multi.cc)
+  target_sources(${LIBNODE_MULTI_TEST} PRIVATE ${EXPERIMENT_SOURCES})
+  target_include_directories(${LIBNODE_MULTI_TEST} PRIVATE src)
+
+  set_target_properties(${LIBNODE_MULTI_TEST} PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+  )
+
+  target_link_libraries(${LIBNODE_MULTI_TEST} PRIVATE LibNode::LibNode)
+
+  # Copy libnode DLL and PDB for test executable
+  if(WIN32 AND LibNode_DLL)
+    add_custom_command(
+      TARGET ${LIBNODE_MULTI_TEST}
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_DLL}" "$<TARGET_FILE_DIR:${LIBNODE_MULTI_TEST}>"
+      COMMENT "Copying libnode.dll to ${LIBNODE_MULTI_TEST} output"
+    )
+    if(LibNode_PDB)
+      add_custom_command(
+        TARGET ${LIBNODE_MULTI_TEST}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_PDB}" "$<TARGET_FILE_DIR:${LIBNODE_MULTI_TEST}>"
+        COMMENT "Copying libnode.pdb to ${LIBNODE_MULTI_TEST} output"
+      )
+    endif()
+  endif()
+endif()
+
+# ============================================================================
+# Main Experiments Test Suite
+# ============================================================================
+if(BUILD_TESTS)
   set(LIBNODE_TEST_TARGET "test-libnode-experiments")
 
   add_executable(${LIBNODE_TEST_TARGET} tests/test_experiments.cpp)
@@ -260,7 +272,8 @@ if(BUILD_LIBNODE_TEST)
 
   target_link_libraries(${LIBNODE_TEST_TARGET} PRIVATE
     LibNode::LibNode
-    Catch2::Catch2
+    Catch2::Catch2 # Testing Library
+#    Catch2::Catch2WithMain # Testing Library
   )
 
   # Copy libnode DLL and PDB for test executable
@@ -281,8 +294,74 @@ if(BUILD_LIBNODE_TEST)
     endif()
   endif()
 
-  # Register tests with CTest
-  if(BUILD_TESTS)
-    catch_discover_tests(${LIBNODE_TEST_TARGET})
+  catch_discover_tests(${LIBNODE_TEST_TARGET})
+endif()
+
+# ============================================================================
+# Fuzzing Tests
+# ============================================================================
+if(BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fuzzing.cpp")
+  set(LIBNODE_FUZZING_TARGET "test-libnode-fuzzing")
+  
+  add_executable(${LIBNODE_FUZZING_TARGET} tests/test_fuzzing.cpp)
+  target_sources(${LIBNODE_FUZZING_TARGET} PRIVATE ${EXPERIMENT_SOURCES})
+  target_include_directories(${LIBNODE_FUZZING_TARGET} PRIVATE src)
+  
+  set_target_properties(${LIBNODE_FUZZING_TARGET} PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+  )
+  
+  target_link_libraries(${LIBNODE_FUZZING_TARGET} PRIVATE
+    LibNode::LibNode
+    Catch2::Catch2 # Testing Library
+    # Catch2::Catch2WithMain # Testing Library
+  )
+  
+  # Copy libnode DLL
+  if(WIN32 AND LibNode_DLL)
+    add_custom_command(
+      TARGET ${LIBNODE_FUZZING_TARGET}
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_DLL}" "$<TARGET_FILE_DIR:${LIBNODE_FUZZING_TARGET}>"
+      COMMENT "Copying libnode.dll to ${LIBNODE_FUZZING_TARGET} output"
+    )
   endif()
+  
+  catch_discover_tests(${LIBNODE_FUZZING_TARGET})
+endif()
+
+# ============================================================================
+# Benchmarks (optional)
+# ============================================================================
+if(BUILD_BENCHMARKS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/benchmarks.cpp")
+  set(LIBNODE_BENCHMARK_TARGET "test-libnode-benchmarks")
+  
+  add_executable(${LIBNODE_BENCHMARK_TARGET} tests/benchmarks.cpp)
+  target_sources(${LIBNODE_BENCHMARK_TARGET} PRIVATE ${EXPERIMENT_SOURCES})
+  target_include_directories(${LIBNODE_BENCHMARK_TARGET} PRIVATE src)
+  
+  set_target_properties(${LIBNODE_BENCHMARK_TARGET} PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+  )
+  
+  target_link_libraries(${LIBNODE_BENCHMARK_TARGET} PRIVATE
+    LibNode::LibNode
+    Catch2::Catch2 # Testing Library
+    # Catch2::Catch2WithMain # Testing Library
+  )
+  
+  # Copy libnode DLL
+  if(WIN32 AND LibNode_DLL)
+    add_custom_command(
+      TARGET ${LIBNODE_BENCHMARK_TARGET}
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LibNode_DLL}" "$<TARGET_FILE_DIR:${LIBNODE_BENCHMARK_TARGET}>"
+      COMMENT "Copying libnode.dll to ${LIBNODE_BENCHMARK_TARGET} output"
+    )
+  endif()
+  
+  # Note: Benchmarks are not auto-discovered as tests since they're for performance measurement
+  message(STATUS "Benchmarks enabled - run ${LIBNODE_BENCHMARK_TARGET} manually")
 endif()

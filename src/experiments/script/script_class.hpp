@@ -16,6 +16,7 @@
 #include <shared_mutex>
 #include <condition_variable>
 #include <unordered_map>
+#include <unordered_set>
 #include <random>
 
 #include "../core/error.hpp"
@@ -129,6 +130,32 @@ public:
     void ClearMetadata() {
         std::unique_lock lock(mutex_);
         metadata_.clear();
+    }
+
+    // Dependencies tracking
+    void AddDependency(const std::string& module_name) {
+        std::unique_lock lock(mutex_);
+        dependencies_.insert(module_name);
+    }
+    
+    std::vector<std::string> GetDependencies() const {
+        std::shared_lock lock(mutex_);
+        return std::vector<std::string>(dependencies_.begin(), dependencies_.end());
+    }
+    
+    bool HasDependency(const std::string& module_name) const {
+        std::shared_lock lock(mutex_);
+        return dependencies_.find(module_name) != dependencies_.end();
+    }
+    
+    void ClearDependencies() {
+        std::unique_lock lock(mutex_);
+        dependencies_.clear();
+    }
+    
+    size_t DependencyCount() const {
+        std::shared_lock lock(mutex_);
+        return dependencies_.size();
     }
 
     // Check if script has a specific permission (requires environment context)
@@ -278,6 +305,9 @@ private:
 
     // Metadata storage
     std::unordered_map<std::string, std::string> metadata_;
+
+    // Dependencies storage
+    std::unordered_set<std::string> dependencies_;
 
     mutable std::shared_mutex mutex_;
     std::condition_variable_any cv_;

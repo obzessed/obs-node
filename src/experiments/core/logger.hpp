@@ -15,6 +15,7 @@
 #include <chrono>
 #include <sstream>
 #include <iomanip>
+#include <fstream>
 
 namespace experiments {
 
@@ -255,6 +256,101 @@ private:
 };
 
 //=============================================================================
+// File Log Sink with Rotation
+//=============================================================================
+
+class FileLogSink {
+public:
+    struct Options {
+        std::string base_path{"app.log"};
+        size_t max_file_size{10 * 1024 * 1024};  // 10MB default
+        size_t max_files{5};
+        LogFormat format{LogFormat::Text};
+    };
+    
+    explicit FileLogSink(Options options = {})
+        : options_(std::move(options)), current_size_(0) {
+        OpenFile();
+    }
+    
+    ~FileLogSink() {
+        Close();
+    }
+    
+    void Write(const LogEntry& entry) {
+        std::lock_guard lock(mutex_);
+        
+        std::string formatted;
+        if (options_.format == LogFormat::Json) {
+            formatted = json_formatter_.Format(entry);
+        } else {
+            formatted = text_formatter_.Format(entry);
+        }
+        formatted += "\n";
+        
+        // Check if rotation needed
+        if (current_size_ + formatted.size() > options_.max_file_size) {
+            Rotate();
+        }
+        
+        if (file_.is_open()) {
+            file_ << formatted;
+            file_.flush();
+            current_size_ += formatted.size();
+        }
+    }
+    
+    void Rotate() {
+        Close();
+        
+        // Rename existing files: app.log.2 -> app.log.3, etc.
+        for (size_t i = options_.max_files - 1; i >= 1; --i) {
+            std::string old_name = options_.base_path + "." + std::to_string(i);
+            std::string new_name = options_.base_path + "." + std::to_string(i + 1);
+            std::rename(old_name.c_str(), new_name.c_str());
+        }
+        
+        // Rename current to .1
+        std::string rotated_name = options_.base_path + ".1";
+        std::rename(options_.base_path.c_str(), rotated_name.c_str());
+        
+        // Delete oldest if over max
+        std::string oldest = options_.base_path + "." + std::to_string(options_.max_files);
+        std::remove(oldest.c_str());
+        
+        // Open new file
+        OpenFile();
+    }
+    
+    void Close() {
+        if (file_.is_open()) {
+            file_.close();
+        }
+    }
+    
+    size_t GetCurrentSize() const { return current_size_; }
+    const Options& GetOptions() const { return options_; }
+
+private:
+    void OpenFile() {
+        file_.open(options_.base_path, std::ios::app);
+        if (file_.is_open()) {
+            file_.seekp(0, std::ios::end);
+            current_size_ = static_cast<size_t>(file_.tellp());
+        } else {
+            current_size_ = 0;
+        }
+    }
+    
+    Options options_;
+    std::ofstream file_;
+    size_t current_size_;
+    std::mutex mutex_;
+    TextLogFormatter text_formatter_;
+    JsonLogFormatter json_formatter_;
+};
+
+//=============================================================================
 // Convenience Macros
 //=============================================================================
 
@@ -266,4 +362,5 @@ private:
 #define LOG_ERROR(cat, msg) LOG(LogLevel::Error, cat, msg)
 
 } // namespace experiments
+
 

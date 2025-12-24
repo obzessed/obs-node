@@ -164,9 +164,19 @@ public:
         ModuleInfo info;
         std::chrono::steady_clock::time_point cached_at;
     };
+    
+    struct RetryOptions {
+        size_t max_retries{3};
+        std::chrono::milliseconds initial_delay{100};
+        double backoff_factor{2.0};  // Exponential backoff
+    };
+    
+    // Progress callback: (bytes_downloaded, total_bytes, url)
+    using DownloadProgressCallback = std::function<void(size_t, size_t, const std::string&)>;
 
-    explicit RemoteLoader(std::chrono::seconds cache_ttl = std::chrono::seconds(3600))
-        : cache_ttl_(cache_ttl) {}
+    explicit RemoteLoader(std::chrono::seconds cache_ttl = std::chrono::seconds(3600),
+                          RetryOptions retry = {})
+        : cache_ttl_(cache_ttl), retry_options_(std::move(retry)) {}
 
     std::optional<ModuleInfo> Load(const std::string& resolved_path) override {
         // Check cache first
@@ -181,8 +191,8 @@ public:
             }
         }
 
-        // Fetch from remote
-        auto source = FetchUrl(resolved_path);
+        // Fetch from remote with retries
+        auto source = FetchUrlWithRetry(resolved_path);
         if (!source) return std::nullopt;
 
         ModuleInfo info;
@@ -212,18 +222,52 @@ public:
         std::lock_guard lock(cache_mutex_);
         cache_.clear();
     }
+    
+    void SetRetryOptions(RetryOptions options) { retry_options_ = std::move(options); }
+    const RetryOptions& GetRetryOptions() const { return retry_options_; }
+    
+    void SetProgressCallback(DownloadProgressCallback cb) { progress_callback_ = std::move(cb); }
 
 private:
     std::chrono::seconds cache_ttl_;
+    RetryOptions retry_options_;
     mutable std::shared_mutex cache_mutex_;
     std::unordered_map<std::string, CacheEntry> cache_;
+    DownloadProgressCallback progress_callback_;
+    
+    std::optional<std::string> FetchUrlWithRetry(const std::string& url) {
+        std::chrono::milliseconds delay = retry_options_.initial_delay;
+        
+        for (size_t attempt = 0; attempt <= retry_options_.max_retries; ++attempt) {
+            auto result = FetchUrl(url);
+            if (result) return result;
+            
+            if (attempt < retry_options_.max_retries) {
+                LOG_DEBUG("RemoteLoader", "Retry " + std::to_string(attempt + 1) + 
+                          " for: " + url + " after " + std::to_string(delay.count()) + "ms");
+                std::this_thread::sleep_for(delay);
+                delay = std::chrono::milliseconds(
+                    static_cast<int64_t>(delay.count() * retry_options_.backoff_factor));
+            }
+        }
+        
+        LOG_WARN("RemoteLoader", "All retries failed for: " + url);
+        return std::nullopt;
+    }
 
     std::optional<std::string> FetchUrl(const std::string& url) {
         // Placeholder - implement with libcurl in production
         LOG_INFO("RemoteLoader", "Would fetch: " + url);
+        
+        // Simulate progress callback if set
+        if (progress_callback_) {
+            progress_callback_(0, 0, url);  // Unknown size
+        }
+        
         return std::nullopt;
     }
 };
+
 
 //=============================================================================
 // Native Module Support - Load .node/.dll/.so files

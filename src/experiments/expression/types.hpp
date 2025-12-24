@@ -24,6 +24,110 @@
 
 namespace experiments {
 
+// Forward declaration
+class ExpressionValue;
+
+//=============================================================================
+// Operator Hooks - Python-style dunder method support
+//=============================================================================
+
+enum class OperatorHook {
+    // Binary arithmetic
+    Add,        // __add__(self, other)
+    Sub,        // __sub__(self, other)
+    Mul,        // __mul__(self, other)
+    Div,        // __div__(self, other)
+    Mod,        // __mod__(self, other)
+    
+    // Binary comparison
+    Eq,         // __eq__(self, other)
+    Ne,         // __ne__(self, other)
+    Lt,         // __lt__(self, other)
+    Le,         // __le__(self, other)
+    Gt,         // __gt__(self, other)
+    Ge,         // __ge__(self, other)
+    
+    // Unary
+    Neg,        // __neg__(self)
+    Not,        // __not__(self)
+    
+    // Conversion
+    Bool,       // __bool__(self)
+    Str,        // __str__(self)
+    Number,     // __number__(self)
+    
+    // Special
+    Call,       // __call__(self, args...)
+    GetItem,    // __getitem__(self, key)
+    SetItem,    // __setitem__(self, key, value)
+    Len,        // __len__(self)
+    Contains,   // __contains__(self, item)
+    Iter,       // __iter__(self)
+};
+
+// Hook function signature: (self, other_or_args) -> result
+using OperatorHookFn = std::function<ExpressionValue(const ExpressionValue&, const std::vector<ExpressionValue>&)>;
+
+// Registry of operator hooks for custom types
+class OperatorHooks {
+public:
+    using HookMap = std::unordered_map<int, OperatorHookFn>;
+    
+    void Set(OperatorHook hook, OperatorHookFn fn) {
+        hooks_[static_cast<int>(hook)] = std::move(fn);
+    }
+    
+    std::optional<OperatorHookFn> Get(OperatorHook hook) const {
+        auto it = hooks_.find(static_cast<int>(hook));
+        if (it != hooks_.end()) return it->second;
+        return std::nullopt;
+    }
+    
+    bool Has(OperatorHook hook) const {
+        return hooks_.contains(static_cast<int>(hook));
+    }
+    
+    void Remove(OperatorHook hook) {
+        hooks_.erase(static_cast<int>(hook));
+    }
+    
+    void Clear() { hooks_.clear(); }
+    
+    size_t Size() const { return hooks_.size(); }
+    bool Empty() const { return hooks_.empty(); }
+
+private:
+    HookMap hooks_;
+};
+
+inline const char* OperatorHookName(OperatorHook hook) {
+    switch (hook) {
+        case OperatorHook::Add: return "__add__";
+        case OperatorHook::Sub: return "__sub__";
+        case OperatorHook::Mul: return "__mul__";
+        case OperatorHook::Div: return "__div__";
+        case OperatorHook::Mod: return "__mod__";
+        case OperatorHook::Eq: return "__eq__";
+        case OperatorHook::Ne: return "__ne__";
+        case OperatorHook::Lt: return "__lt__";
+        case OperatorHook::Le: return "__le__";
+        case OperatorHook::Gt: return "__gt__";
+        case OperatorHook::Ge: return "__ge__";
+        case OperatorHook::Neg: return "__neg__";
+        case OperatorHook::Not: return "__not__";
+        case OperatorHook::Bool: return "__bool__";
+        case OperatorHook::Str: return "__str__";
+        case OperatorHook::Number: return "__number__";
+        case OperatorHook::Call: return "__call__";
+        case OperatorHook::GetItem: return "__getitem__";
+        case OperatorHook::SetItem: return "__setitem__";
+        case OperatorHook::Len: return "__len__";
+        case OperatorHook::Contains: return "__contains__";
+        case OperatorHook::Iter: return "__iter__";
+    }
+    return "__unknown__";
+}
+
 //=============================================================================
 // Expression Engine - Evaluate formulas and expressions
 //=============================================================================
@@ -110,7 +214,7 @@ public:
         return type_ == Type::Object ? std::get<ObjectType>(value_) : empty;
     }
 
-    // Operators
+    // Comparison Operators
     bool operator==(const ExpressionValue& other) const {
         if (type_ != other.type_) return false;
         return value_ == other.value_;
@@ -118,6 +222,68 @@ public:
 
     bool operator!=(const ExpressionValue& other) const {
         return !(*this == other);
+    }
+
+    bool operator<(const ExpressionValue& other) const {
+        return AsNumber() < other.AsNumber();
+    }
+
+    bool operator<=(const ExpressionValue& other) const {
+        return AsNumber() <= other.AsNumber();
+    }
+
+    bool operator>(const ExpressionValue& other) const {
+        return AsNumber() > other.AsNumber();
+    }
+
+    bool operator>=(const ExpressionValue& other) const {
+        return AsNumber() >= other.AsNumber();
+    }
+
+    // Arithmetic Operators
+    ExpressionValue operator+(const ExpressionValue& other) const {
+        // String concatenation if either is string
+        if (IsString() || other.IsString()) {
+            return ExpressionValue(AsString() + other.AsString());
+        }
+        return ExpressionValue(AsNumber() + other.AsNumber());
+    }
+
+    ExpressionValue operator-(const ExpressionValue& other) const {
+        return ExpressionValue(AsNumber() - other.AsNumber());
+    }
+
+    ExpressionValue operator*(const ExpressionValue& other) const {
+        return ExpressionValue(AsNumber() * other.AsNumber());
+    }
+
+    ExpressionValue operator/(const ExpressionValue& other) const {
+        double divisor = other.AsNumber();
+        if (divisor == 0) return ExpressionValue(std::nan(""));
+        return ExpressionValue(AsNumber() / divisor);
+    }
+
+    ExpressionValue operator%(const ExpressionValue& other) const {
+        double divisor = other.AsNumber();
+        if (divisor == 0) return ExpressionValue(std::nan(""));
+        return ExpressionValue(std::fmod(AsNumber(), divisor));
+    }
+
+    ExpressionValue operator-() const {
+        return ExpressionValue(-AsNumber());
+    }
+
+    // Logical Operators
+    bool operator&&(const ExpressionValue& other) const {
+        return AsBoolean() && other.AsBoolean();
+    }
+
+    bool operator||(const ExpressionValue& other) const {
+        return AsBoolean() || other.AsBoolean();
+    }
+
+    bool operator!() const {
+        return !AsBoolean();
     }
 
     // Serialize to JSON
@@ -166,10 +332,55 @@ public:
         }
         return "unknown";
     }
+    
+    //=========================================================================
+    // Operator Hooks - Python-style dunder methods
+    //=========================================================================
+    
+    // Set a hook for this value (only for objects)
+    void SetHook(OperatorHook hook, OperatorHookFn fn) {
+        if (!hooks_) hooks_ = std::make_shared<OperatorHooks>();
+        hooks_->Set(hook, std::move(fn));
+    }
+    
+    // Get a hook
+    std::optional<OperatorHookFn> GetHook(OperatorHook hook) const {
+        if (!hooks_) return std::nullopt;
+        return hooks_->Get(hook);
+    }
+    
+    // Check if a hook exists
+    bool HasHook(OperatorHook hook) const {
+        return hooks_ && hooks_->Has(hook);
+    }
+    
+    // Get all hooks
+    const OperatorHooks* GetHooks() const {
+        return hooks_.get();
+    }
+    
+    // Call a hook with arguments
+    std::optional<ExpressionValue> CallHook(OperatorHook hook, 
+                                             const std::vector<ExpressionValue>& args = {}) const {
+        if (auto fn = GetHook(hook)) {
+            return (*fn)(*this, args);
+        }
+        return std::nullopt;
+    }
+    
+    // Binary operation with hook fallback
+    ExpressionValue ApplyBinaryHook(OperatorHook hook, const ExpressionValue& other,
+                                     std::function<ExpressionValue()> fallback) const {
+        if (auto fn = GetHook(hook)) {
+            return (*fn)(*this, {other});
+        }
+        return fallback();
+    }
 
 private:
     ValueVariant value_;
     Type type_;
+    std::shared_ptr<OperatorHooks> hooks_;  // Optional hooks for custom types
 };
 
 // ExpressionContext - Variable bindings with scope support

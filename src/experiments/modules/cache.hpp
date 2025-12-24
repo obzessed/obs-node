@@ -13,6 +13,7 @@
 #include <list>
 #include <vector>
 #include <algorithm>
+#include <future>
 
 #include "module_info.hpp"
 #include "loaders.hpp"
@@ -558,6 +559,36 @@ public:
     // Get inner loader
     ModuleLoaderPtr GetInnerLoader() const {
         return inner_loader_;
+    }
+    
+    // Async preloading for cache warming
+    std::future<bool> PreloadAsync(const std::string& resolved_path) {
+        return std::async(std::launch::async, [this, resolved_path]() {
+            auto result = Load(resolved_path);
+            return result.has_value();
+        });
+    }
+    
+    // Batch async preloading
+    std::vector<std::future<bool>> PreloadBatchAsync(const std::vector<std::string>& paths) {
+        std::vector<std::future<bool>> futures;
+        futures.reserve(paths.size());
+        for (const auto& path : paths) {
+            futures.push_back(PreloadAsync(path));
+        }
+        return futures;
+    }
+    
+    // Synchronous batch preload with progress callback
+    using ProgressCallback = std::function<void(size_t current, size_t total, const std::string& path)>;
+    
+    size_t PreloadBatch(const std::vector<std::string>& paths, ProgressCallback progress = nullptr) {
+        size_t loaded = 0;
+        for (size_t i = 0; i < paths.size(); ++i) {
+            if (progress) progress(i + 1, paths.size(), paths[i]);
+            if (Load(paths[i])) loaded++;
+        }
+        return loaded;
     }
     
 private:

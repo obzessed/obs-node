@@ -18,6 +18,8 @@
 #include <chrono>
 #include <stdexcept>
 #include <cctype>
+#include <future>
+#include <atomic>
 
 #include "types.hpp"
 
@@ -33,18 +35,61 @@ public:
         : source_(std::move(source))
         , compiled_(compiled.empty() ? source_ : std::move(compiled))
         , compiled_at_(std::chrono::steady_clock::now()) {}
+    
+    // Copy constructor - copies the usage count value
+    Expression(const Expression& other)
+        : source_(other.source_)
+        , compiled_(other.compiled_)
+        , compiled_at_(other.compiled_at_)
+        , usage_count_(other.usage_count_.load()) {}
+    
+    // Copy assignment
+    Expression& operator=(const Expression& other) {
+        if (this != &other) {
+            source_ = other.source_;
+            compiled_ = other.compiled_;
+            compiled_at_ = other.compiled_at_;
+            usage_count_.store(other.usage_count_.load());
+        }
+        return *this;
+    }
+    
+    // Move constructor
+    Expression(Expression&& other) noexcept
+        : source_(std::move(other.source_))
+        , compiled_(std::move(other.compiled_))
+        , compiled_at_(other.compiled_at_)
+        , usage_count_(other.usage_count_.load()) {}
+    
+    // Move assignment
+    Expression& operator=(Expression&& other) noexcept {
+        if (this != &other) {
+            source_ = std::move(other.source_);
+            compiled_ = std::move(other.compiled_);
+            compiled_at_ = other.compiled_at_;
+            usage_count_.store(other.usage_count_.load());
+        }
+        return *this;
+    }
 
     const std::string& GetSource() const { return source_; }
     const std::string& GetCompiled() const { return compiled_; }
     bool IsValid() const { return !source_.empty(); }
 
     std::chrono::steady_clock::time_point GetCompiledAt() const { return compiled_at_; }
+    
+    // Hot expression tracking
+    void IncrementUsage() { usage_count_++; }
+    uint64_t GetUsageCount() const { return usage_count_; }
+    bool IsHot(uint64_t threshold = 10) const { return usage_count_ >= threshold; }
 
 private:
     std::string source_;
     std::string compiled_;
     std::chrono::steady_clock::time_point compiled_at_;
+    std::atomic<uint64_t> usage_count_{0};
 };
+
 
 // ExpressionCache - Cache compiled expressions
 class ExpressionCache {
@@ -252,6 +297,61 @@ public:
     ExpressionFunctionRegistry& GetFunctions() { return functions_; }
     ExpressionCache& GetCache() { return cache_; }
     Options& GetOptions() { return options_; }
+    
+    // Async evaluation
+    std::future<ExpressionResult> EvaluateAsync(const std::string& source) {
+        return std::async(std::launch::async, [this, source]() {
+            ExpressionContext context;
+            return Evaluate(source, context);
+        });
+    }
+    
+    std::future<ExpressionResult> EvaluateAsync(const std::string& source, ExpressionContext context) {
+        return std::async(std::launch::async, [this, source, ctx = std::move(context)]() mutable {
+            return Evaluate(source, ctx);
+        });
+    }
+    
+    // Batch async evaluation
+    std::vector<std::future<ExpressionResult>> EvaluateBatchAsync(
+            const std::vector<std::string>& sources) {
+        std::vector<std::future<ExpressionResult>> futures;
+        futures.reserve(sources.size());
+        for (const auto& source : sources) {
+            futures.push_back(EvaluateAsync(source));
+        }
+        return futures;
+    }
+    
+    // Pre-compilation for hot expressions
+    std::optional<Expression> Compile(const std::string& source) {
+        if (source.empty()) return std::nullopt;
+        
+        try {
+            Lexer lexer(source);
+            auto tokens = lexer.Tokenize();
+            // For now, just validate tokens and store as compiled
+            Expression expr(source, source);
+            cache_.Put(source, expr);
+            return expr;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    
+    // Evaluate a pre-compiled expression
+    ExpressionResult EvaluateCompiled(Expression& expr, ExpressionContext& context) {
+        expr.IncrementUsage();
+        return Evaluate(expr.GetSource(), context);
+    }
+    
+    // Get hot expressions from cache
+    std::vector<std::string> GetHotExpressions(uint64_t threshold = 10) {
+        std::vector<std::string> hot;
+        // Note: would need to add a method to ExpressionCache to iterate
+        // For now, return empty - proper implementation requires cache iteration
+        return hot;
+    }
 
 private:
     Options options_;

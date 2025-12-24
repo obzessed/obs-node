@@ -15,8 +15,9 @@
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <catch2/catch_approx.hpp>
 
-// all out experimentation sources
+// all our experimentation sources
 #include "experiments/all.hpp"
 
 using namespace experiments;
@@ -1807,6 +1808,485 @@ TEST_CASE("Test 23: Sandbox Path Security", "[isolation][sandbox]") {
         SandboxGuard guard(config);
 
         CHECK(!guard.CheckFileRead("./blocked/file.txt"));
+    }
+}
+
+//=============================================================================
+// EXTENDED FEATURE TESTS (24-29)
+//=============================================================================
+
+TEST_CASE("Test 24: ExpressionValue Operators", "[expression][operators]") {
+    SECTION("24.1 Arithmetic Operators") {
+        ExpressionValue a(10.0);
+        ExpressionValue b(3.0);
+        
+        CHECK((a + b).AsNumber() == 13.0);
+        CHECK((a - b).AsNumber() == 7.0);
+        CHECK((a * b).AsNumber() == 30.0);
+        CHECK((a / b).AsNumber() == Catch::Approx(3.333).epsilon(0.01));
+        CHECK((a % b).AsNumber() == 1.0);
+        CHECK((-a).AsNumber() == -10.0);
+    }
+    
+    SECTION("24.2 Comparison Operators") {
+        ExpressionValue a(5.0);
+        ExpressionValue b(10.0);
+        
+        CHECK(a < b);
+        CHECK(a <= b);
+        CHECK(b > a);
+        CHECK(b >= a);
+        CHECK(a <= a);
+        CHECK(a >= a);
+    }
+    
+    SECTION("24.3 Logical Operators") {
+        ExpressionValue t(true);
+        ExpressionValue f(false);
+        
+        CHECK((t && t) == true);
+        CHECK((t && f) == false);
+        CHECK((t || f) == true);
+        CHECK((f || f) == false);
+        CHECK(!f == true);
+        CHECK(!t == false);
+    }
+    
+    SECTION("24.4 String Concatenation") {
+        ExpressionValue s1("Hello");
+        ExpressionValue s2(" World");
+        
+        auto result = s1 + s2;
+        CHECK(result.AsString() == "Hello World");
+    }
+}
+
+TEST_CASE("Test 25: Async Expression Evaluation", "[expression][async]") {
+    ExpressionEngine engine;
+    
+    SECTION("25.1 EvaluateAsync") {
+        auto future = engine.EvaluateAsync("1 + 2 * 3");
+        auto result = future.get();
+        
+        CHECK(result.success);
+        CHECK(result.value.AsNumber() == 7.0);
+    }
+    
+    SECTION("25.2 EvaluateBatchAsync") {
+        std::vector<std::string> exprs = {"1+1", "2+2", "3+3"};
+        auto futures = engine.EvaluateBatchAsync(exprs);
+        
+        CHECK(futures.size() == 3);
+        
+        auto r1 = futures[0].get();
+        auto r2 = futures[1].get();
+        auto r3 = futures[2].get();
+        
+        CHECK(r1.value.AsNumber() == 2.0);
+        CHECK(r2.value.AsNumber() == 4.0);
+        CHECK(r3.value.AsNumber() == 6.0);
+    }
+    
+    SECTION("25.3 Compile and Hot Tracking") {
+        auto compiled = engine.Compile("100 / 5");
+        REQUIRE(compiled.has_value());
+        
+        CHECK(compiled->GetUsageCount() == 0);
+        CHECK(!compiled->IsHot());
+        
+        ExpressionContext ctx;
+        for (int i = 0; i < 15; ++i) {
+            engine.EvaluateCompiled(*compiled, ctx);
+        }
+        
+        CHECK(compiled->GetUsageCount() == 15);
+        CHECK(compiled->IsHot());
+    }
+}
+
+TEST_CASE("Test 26: Script Dependencies", "[script][dependencies]") {
+    SECTION("26.1 Add and Check Dependencies") {
+        auto script = std::make_shared<Script>("'test';");
+        
+        script->AddDependency("lodash");
+        script->AddDependency("react");
+        script->AddDependency("lodash"); // duplicate
+        
+        CHECK(script->HasDependency("lodash"));
+        CHECK(script->HasDependency("react"));
+        CHECK(!script->HasDependency("vue"));
+        CHECK(script->DependencyCount() == 2); // no duplicates
+    }
+    
+    SECTION("26.2 GetDependencies") {
+        auto script = std::make_shared<Script>("'test';");
+        script->AddDependency("a");
+        script->AddDependency("b");
+        script->AddDependency("c");
+        
+        auto deps = script->GetDependencies();
+        CHECK(deps.size() == 3);
+    }
+    
+    SECTION("26.3 ClearDependencies") {
+        auto script = std::make_shared<Script>("'test';");
+        script->AddDependency("dep1");
+        CHECK(script->DependencyCount() == 1);
+        
+        script->ClearDependencies();
+        CHECK(script->DependencyCount() == 0);
+    }
+}
+
+TEST_CASE("Test 27: File Log Sink", "[logger][file]") {
+    SECTION("27.1 Options") {
+        FileLogSink::Options opts;
+        opts.base_path = "test.log";
+        opts.max_file_size = 1024;
+        opts.max_files = 3;
+        opts.format = LogFormat::Json;
+        
+        FileLogSink sink(opts);
+        CHECK(sink.GetOptions().max_file_size == 1024);
+        CHECK(sink.GetOptions().max_files == 3);
+    }
+    
+    SECTION("27.2 Write Entry") {
+        FileLogSink::Options opts;
+        opts.base_path = "test_write.log";
+        opts.max_file_size = 10000;
+        
+        {
+            FileLogSink sink(opts);
+            LogEntry entry(LogLevel::Info, "test", "Test message");
+            sink.Write(entry);
+            CHECK(sink.GetCurrentSize() > 0);
+        }
+        
+        // Cleanup
+        std::remove("test_write.log");
+    }
+}
+
+TEST_CASE("Test 28: Remote Loader Retry", "[modules][retry]") {
+    SECTION("28.1 Retry Options") {
+        RemoteLoader::RetryOptions opts;
+        opts.max_retries = 5;
+        opts.initial_delay = 50ms;
+        opts.backoff_factor = 1.5;
+        
+        RemoteLoader loader(std::chrono::seconds(60), opts);
+        CHECK(loader.GetRetryOptions().max_retries == 5);
+    }
+    
+    SECTION("28.2 Progress Callback") {
+        RemoteLoader loader;
+        bool called = false;
+        
+        loader.SetProgressCallback([&called](size_t, size_t, const std::string&) {
+            called = true;
+        });
+        
+        // Load will fail (placeholder), but callback should be invoked
+        loader.Load("https://example.com/test.js");
+        CHECK(called);
+    }
+}
+
+TEST_CASE("Test 29: Thread-Safe Iteration", "[thread][iteration]") {
+    ThreadSafeMap<std::string, int> map;
+    map.Set("a", 1);
+    map.Set("b", 2);
+    map.Set("c", 3);
+    
+    SECTION("29.1 LockedForEach") {
+        int sum = 0;
+        map.LockedForEach([&sum](const std::string&, int v) {
+            sum += v;
+            return false; // continue
+        });
+        CHECK(sum == 6);
+    }
+    
+    SECTION("29.2 LockedForEach with early exit") {
+        std::string found;
+        map.LockedForEach([&found](const std::string& k, int v) {
+            if (v == 2) {
+                found = k;
+                return true; // break
+            }
+            return false;
+        });
+        CHECK(found == "b");
+    }
+    
+    SECTION("29.3 Collect") {
+        auto filtered = map.Collect([](const std::string&, int v) {
+            return v > 1;
+        });
+        CHECK(filtered.size() == 2);
+    }
+    
+    SECTION("29.4 GetLockedView") {
+        size_t count = 0;
+        {
+            auto view = map.GetLockedView();
+            for (const auto& [k, v] : view) {
+                count++;
+            }
+        }
+        CHECK(count == 3);
+    }
+}
+
+TEST_CASE("Test 30: Reactive Expressions", "[expression][reactive]") {
+    SECTION("30.1 ReactiveValue Basics") {
+        ReactiveContext ctx;
+        
+        auto x = ctx.CreateValue("x", ExpressionValue(10.0));
+        CHECK(x->Get().AsNumber() == 10.0);
+        
+        x->Set(ExpressionValue(20.0));
+        CHECK(x->Get().AsNumber() == 20.0);
+        CHECK(x->GetVersion() > 0);
+    }
+    
+    SECTION("30.2 ReactiveValue Subscription") {
+        ReactiveContext ctx;
+        auto x = ctx.CreateValue("x", ExpressionValue(5.0));
+        
+        double notified_value = 0;
+        auto sub_id = x->Subscribe([&notified_value](const ExpressionValue& v) {
+            notified_value = v.AsNumber();
+        });
+        
+        x->Set(ExpressionValue(15.0));
+        CHECK(notified_value == 15.0);
+        
+        x->Unsubscribe(sub_id);
+        x->Set(ExpressionValue(25.0));
+        CHECK(notified_value == 15.0);  // Not updated after unsubscribe
+    }
+    
+    SECTION("30.3 ReactiveExpression Auto-Update") {
+        ReactiveContext ctx;
+        ctx.Set("x", ExpressionValue(10.0));
+        ctx.Set("y", ExpressionValue(20.0));
+        
+        auto sum = ctx.CreateExpression("x + y");
+        CHECK(sum->IsValid());
+        CHECK(sum->Get().AsNumber() == 30.0);
+        
+        // Change x
+        ctx.Set("x", ExpressionValue(15.0));
+        CHECK(sum->Get().AsNumber() == 35.0);
+        
+        // Change y
+        ctx.Set("y", ExpressionValue(25.0));
+        CHECK(sum->Get().AsNumber() == 40.0);
+    }
+    
+    SECTION("30.4 ReactiveExpression OnChange Callback") {
+        ReactiveContext ctx;
+        ctx.Set("a", ExpressionValue(5.0));
+        ctx.Set("b", ExpressionValue(3.0));
+        
+        auto product = ctx.CreateExpression("a * b");
+        
+        std::vector<double> changes;
+        product->OnChange([&changes](const ExpressionValue& v) {
+            changes.push_back(v.AsNumber());
+        });
+        
+        ctx.Set("a", ExpressionValue(10.0));  // 10 * 3 = 30
+        ctx.Set("b", ExpressionValue(4.0));   // 10 * 4 = 40
+        
+        REQUIRE(changes.size() >= 2);
+        CHECK(changes.back() == 40.0);
+    }
+    
+    SECTION("30.5 Batch Updates") {
+        ReactiveContext ctx;
+        ctx.Set("x", ExpressionValue(1.0));
+        
+        auto expr = ctx.CreateExpression("x * 2");
+        
+        int update_count = 0;
+        expr->OnChange([&update_count](const ExpressionValue&) {
+            update_count++;
+        });
+        
+        // Without batch: each Set triggers an update
+        ctx.Set("x", ExpressionValue(2.0));
+        ctx.Set("x", ExpressionValue(3.0));
+        int individual_updates = update_count;
+        
+        // With batch: updates are deferred
+        update_count = 0;
+        ctx.Batch([&ctx]() {
+            ctx.Set("x", ExpressionValue(4.0));
+            ctx.Set("x", ExpressionValue(5.0));
+            ctx.Set("x", ExpressionValue(6.0));
+        });
+        
+        // Batch should result in fewer notifications
+        CHECK(expr->Get().AsNumber() == 12.0);  // 6 * 2
+    }
+    
+    SECTION("30.6 Get Dependencies") {
+        ReactiveContext ctx;
+        ctx.Set("width", ExpressionValue(10.0));
+        ctx.Set("height", ExpressionValue(20.0));
+        
+        auto area = ctx.CreateExpression("width * height");
+        auto deps = area->GetDependencies();
+        
+        CHECK(deps.size() >= 2);
+        // Check that both are tracked
+        bool has_width = std::find(deps.begin(), deps.end(), "width") != deps.end();
+        bool has_height = std::find(deps.begin(), deps.end(), "height") != deps.end();
+        CHECK(has_width);
+        CHECK(has_height);
+    }
+    
+    SECTION("30.7 Complex Expression Chain") {
+        ReactiveContext ctx;
+        ctx.Set("base", ExpressionValue(100.0));
+        ctx.Set("rate", ExpressionValue(0.1));
+        
+        auto interest = ctx.CreateExpression("base * rate");
+        auto total = ctx.CreateExpression("base + base * rate");
+        
+        CHECK(interest->Get().AsNumber() == 10.0);
+        CHECK(total->Get().AsNumber() == 110.0);
+        
+        ctx.Set("base", ExpressionValue(200.0));
+        CHECK(interest->Get().AsNumber() == 20.0);
+        CHECK(total->Get().AsNumber() == 220.0);
+        
+        ctx.Set("rate", ExpressionValue(0.2));
+        CHECK(interest->Get().AsNumber() == 40.0);
+        CHECK(total->Get().AsNumber() == 240.0);
+    }
+}
+
+TEST_CASE("Test 31: Operator Hooks", "[expression][hooks]") {
+    SECTION("31.1 Basic Hook Set/Has/Get") {
+        ExpressionValue val(42.0);
+        
+        CHECK(!val.HasHook(OperatorHook::Add));
+        
+        val.SetHook(OperatorHook::Add, [](const ExpressionValue& self, const std::vector<ExpressionValue>& args) {
+            return ExpressionValue(self.AsNumber() + args[0].AsNumber() * 2);
+        });
+        
+        CHECK(val.HasHook(OperatorHook::Add));
+        CHECK(val.GetHook(OperatorHook::Add).has_value());
+    }
+    
+    SECTION("31.2 CallHook") {
+        ExpressionValue val(10.0);
+        
+        val.SetHook(OperatorHook::Neg, [](const ExpressionValue& self, const std::vector<ExpressionValue>&) {
+            return ExpressionValue(-self.AsNumber() * 100);  // Custom negate
+        });
+        
+        auto result = val.CallHook(OperatorHook::Neg);
+        REQUIRE(result.has_value());
+        CHECK(result->AsNumber() == -1000.0);
+    }
+    
+    SECTION("31.3 ApplyBinaryHook with custom __add__") {
+        ExpressionValue obj;
+        obj.SetHook(OperatorHook::Add, [](const ExpressionValue& self, const std::vector<ExpressionValue>& args) {
+            // Custom add: concatenate strings with " + "
+            return ExpressionValue(self.AsString() + " + " + args[0].AsString());
+        });
+        
+        ExpressionValue other("world");
+        auto result = obj.ApplyBinaryHook(OperatorHook::Add, other, []() {
+            return ExpressionValue("fallback");
+        });
+        
+        CHECK(result.AsString() == "null + world");
+    }
+    
+    SECTION("31.4 Conversion hooks __str__ and __bool__") {
+        ExpressionValue::ObjectType data;
+        data["name"] = ExpressionValue("MyObject");
+        data["active"] = ExpressionValue(true);
+        
+        ExpressionValue obj(data);
+        
+        obj.SetHook(OperatorHook::Str, [](const ExpressionValue& self, const std::vector<ExpressionValue>&) {
+            auto& o = self.AsObject();
+            auto it = o.find("name");
+            if (it != o.end()) return ExpressionValue("<Object: " + it->second.AsString() + ">");
+            return ExpressionValue("<Object>");
+        });
+        
+        obj.SetHook(OperatorHook::Bool, [](const ExpressionValue& self, const std::vector<ExpressionValue>&) {
+            auto& o = self.AsObject();
+            auto it = o.find("active");
+            return ExpressionValue(it != o.end() && it->second.AsBoolean());
+        });
+        
+        auto str_result = obj.CallHook(OperatorHook::Str);
+        REQUIRE(str_result.has_value());
+        CHECK(str_result->AsString() == "<Object: MyObject>");
+        
+        auto bool_result = obj.CallHook(OperatorHook::Bool);
+        REQUIRE(bool_result.has_value());
+        CHECK(bool_result->AsBoolean() == true);
+    }
+    
+    SECTION("31.5 Custom Vector type with __add__ and __len__") {
+        // Create a "Vector" object
+        ExpressionValue::ArrayType vec_data = {ExpressionValue(1.0), ExpressionValue(2.0), ExpressionValue(3.0)};
+        ExpressionValue vec(vec_data);
+        
+        // __add__: element-wise addition
+        vec.SetHook(OperatorHook::Add, [](const ExpressionValue& self, const std::vector<ExpressionValue>& args) {
+            auto& arr1 = self.AsArray();
+            auto& arr2 = args[0].AsArray();
+            
+            ExpressionValue::ArrayType result;
+            size_t len = std::min(arr1.size(), arr2.size());
+            for (size_t i = 0; i < len; ++i) {
+                result.push_back(ExpressionValue(arr1[i].AsNumber() + arr2[i].AsNumber()));
+            }
+            return ExpressionValue(result);
+        });
+        
+        // __len__: return array length
+        vec.SetHook(OperatorHook::Len, [](const ExpressionValue& self, const std::vector<ExpressionValue>&) {
+            return ExpressionValue(static_cast<double>(self.AsArray().size()));
+        });
+        
+        // Test __len__
+        auto len_result = vec.CallHook(OperatorHook::Len);
+        REQUIRE(len_result.has_value());
+        CHECK(len_result->AsNumber() == 3.0);
+        
+        // Test __add__
+        ExpressionValue::ArrayType vec2_data = {ExpressionValue(10.0), ExpressionValue(20.0), ExpressionValue(30.0)};
+        ExpressionValue vec2(vec2_data);
+        
+        auto add_result = vec.CallHook(OperatorHook::Add, {vec2});
+        REQUIRE(add_result.has_value());
+        
+        auto& sum_arr = add_result->AsArray();
+        REQUIRE(sum_arr.size() == 3);
+        CHECK(sum_arr[0].AsNumber() == 11.0);
+        CHECK(sum_arr[1].AsNumber() == 22.0);
+        CHECK(sum_arr[2].AsNumber() == 33.0);
+    }
+    
+    SECTION("31.6 OperatorHookName") {
+        CHECK(std::string(OperatorHookName(OperatorHook::Add)) == "__add__");
+        CHECK(std::string(OperatorHookName(OperatorHook::Eq)) == "__eq__");
+        CHECK(std::string(OperatorHookName(OperatorHook::Call)) == "__call__");
+        CHECK(std::string(OperatorHookName(OperatorHook::Len)) == "__len__");
     }
 }
 

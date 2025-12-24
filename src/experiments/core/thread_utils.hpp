@@ -162,6 +162,86 @@ public:
         auto [it, inserted] = data_.try_emplace(key, default_value);
         return it->second;
     }
+    
+    //=========================================================================
+    // Thread-Safe Iteration Support
+    //=========================================================================
+    
+    // LockedView - RAII wrapper that holds lock during iteration
+    class LockedView {
+    public:
+        using iterator = typename MapType::iterator;
+        using const_iterator = typename MapType::const_iterator;
+        
+        LockedView(MapType& data, std::shared_mutex& mutex)
+            : data_(data), lock_(mutex) {}
+        
+        iterator begin() { return data_.begin(); }
+        iterator end() { return data_.end(); }
+        const_iterator begin() const { return data_.begin(); }
+        const_iterator end() const { return data_.end(); }
+        const_iterator cbegin() const { return data_.cbegin(); }
+        const_iterator cend() const { return data_.cend(); }
+        
+        size_t size() const { return data_.size(); }
+        bool empty() const { return data_.empty(); }
+        
+    private:
+        MapType& data_;
+        std::unique_lock<std::shared_mutex> lock_;
+    };
+    
+    class ConstLockedView {
+    public:
+        using const_iterator = typename MapType::const_iterator;
+        
+        ConstLockedView(const MapType& data, std::shared_mutex& mutex)
+            : data_(data), lock_(mutex) {}
+        
+        const_iterator begin() const { return data_.begin(); }
+        const_iterator end() const { return data_.end(); }
+        const_iterator cbegin() const { return data_.cbegin(); }
+        const_iterator cend() const { return data_.cend(); }
+        
+        size_t size() const { return data_.size(); }
+        bool empty() const { return data_.empty(); }
+        
+    private:
+        const MapType& data_;
+        std::shared_lock<std::shared_mutex> lock_;
+    };
+    
+    // Get locked view for iteration (holds lock until view is destroyed)
+    LockedView GetLockedView() {
+        return LockedView(data_, mutex_);
+    }
+    
+    ConstLockedView GetLockedView() const {
+        return ConstLockedView(data_, mutex_);
+    }
+    
+    // LockedForEach - iterate with early exit support
+    // Callback returns bool: false to continue, true to break
+    template<typename Fn>
+    void LockedForEach(Fn&& fn) {
+        std::shared_lock lock(mutex_);
+        for (const auto& [k, v] : data_) {
+            if (fn(k, v)) break;
+        }
+    }
+    
+    // Collect - filter and collect matching entries
+    template<typename Pred>
+    std::vector<std::pair<K, V>> Collect(Pred&& predicate) const {
+        std::shared_lock lock(mutex_);
+        std::vector<std::pair<K, V>> result;
+        for (const auto& [k, v] : data_) {
+            if (predicate(k, v)) {
+                result.emplace_back(k, v);
+            }
+        }
+        return result;
+    }
 
 private:
     mutable std::shared_mutex mutex_;
