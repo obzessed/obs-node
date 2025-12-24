@@ -2290,6 +2290,286 @@ TEST_CASE("Test 31: Operator Hooks", "[expression][hooks]") {
     }
 }
 
+//=============================================================================
+// Test 32: ScriptResult API
+//=============================================================================
+
+TEST_CASE("Test 32: ScriptResult API", "[script][result]") {
+    auto& engine = ScriptEngine::Instance();
+    
+    SECTION("32.1 Number result") {
+        auto script = engine.CreateScript("42.5;", {.name = "number-test"});
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->GetState() == ScriptState::Completed);
+        REQUIRE(script->HasResultValue());
+        
+        auto& result = script->GetResultValue();
+        CHECK(result.IsNumber());
+        CHECK(!result.IsString());
+        CHECK(!result.IsObject());
+        
+        auto num = result.ToNumber();
+        REQUIRE(num.has_value());
+        CHECK(*num == Catch::Approx(42.5));
+        
+        auto int64 = result.ToInt64();
+        REQUIRE(int64.has_value());
+        CHECK(*int64 == 42);
+    }
+    
+    SECTION("32.2 String result") {
+        auto script = engine.CreateScript("'hello world';", {.name = "string-test"});
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->GetState() == ScriptState::Completed);
+        REQUIRE(script->HasResultValue());
+        
+        auto& result = script->GetResultValue();
+        CHECK(result.IsString());
+        CHECK(!result.IsNumber());
+        
+        CHECK(result.ToString() == "hello world");
+        CHECK(result.GetStringResult() == "hello world");
+    }
+    
+    SECTION("32.3 Boolean result") {
+        auto script = engine.CreateScript("true;", {.name = "bool-test"});
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->GetState() == ScriptState::Completed);
+        REQUIRE(script->HasResultValue());
+        
+        auto& result = script->GetResultValue();
+        CHECK(result.IsBoolean());
+        
+        auto boolVal = result.ToBool();
+        REQUIRE(boolVal.has_value());
+        CHECK(*boolVal == true);
+    }
+    
+    SECTION("32.4 Object result") {
+        auto script = engine.CreateScript("({a: 1, b: 'test'});", {.name = "object-test"});
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->GetState() == ScriptState::Completed);
+        REQUIRE(script->HasResultValue());
+        
+        auto& result = script->GetResultValue();
+        CHECK(result.IsObject());
+        CHECK(!result.IsArray());
+        
+        // ToString should return JSON-like representation
+        auto str = result.ToString();
+        CHECK(str.find("object") != std::string::npos);
+    }
+    
+    SECTION("32.5 Array result") {
+        auto script = engine.CreateScript("[1, 2, 3];", {.name = "array-test"});
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->GetState() == ScriptState::Completed);
+        REQUIRE(script->HasResultValue());
+        
+        auto& result = script->GetResultValue();
+        CHECK(result.IsArray());
+        CHECK(result.IsObject()); // Arrays are objects in JS
+    }
+    
+    SECTION("32.6 Null and undefined") {
+        auto scriptNull = engine.CreateScript("null;", {.name = "null-test"});
+        auto scriptUndef = engine.CreateScript("undefined;", {.name = "undef-test"});
+        auto mainEnv = engine.GetMainEnvironment();
+        
+        mainEnv->Execute(scriptNull);
+        mainEnv->Execute(scriptUndef);
+        scriptNull->Wait(5s);
+        scriptUndef->Wait(5s);
+        
+        REQUIRE(scriptNull->HasResultValue());
+        REQUIRE(scriptUndef->HasResultValue());
+        
+        CHECK(scriptNull->GetResultValue().IsNull());
+        CHECK(scriptNull->GetResultValue().IsNullOrUndefined());
+        
+        CHECK(scriptUndef->GetResultValue().IsUndefined());
+        CHECK(scriptUndef->GetResultValue().IsNullOrUndefined());
+    }
+    
+    SECTION("32.7 Function result") {
+        auto script = engine.CreateScript("(function test() { return 42; });", {.name = "func-test"});
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->GetState() == ScriptState::Completed);
+        REQUIRE(script->HasResultValue());
+        
+        CHECK(script->GetResultValue().IsFunction());
+    }
+    
+    SECTION("32.8 Empty result on failure") {
+        // Invalid script should fail and have no result value
+        auto script = engine.CreateScript("syntax error !!!!", {.name = "fail-test"});
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        CHECK(script->GetState() == ScriptState::Failed);
+        CHECK(!script->HasResultValue());
+    }
+}
+
+//=============================================================================
+// Test 33: ScriptResult Function Calling
+//=============================================================================
+
+TEST_CASE("Test 33: ScriptResult Function Calling", "[script][result][call]") {
+    auto& engine = ScriptEngine::Instance();
+    
+    SECTION("33.1 Call function with no args") {
+        auto script = engine.CreateScript(
+            "(function() { return 42; });",
+            {.name = "func-noargs"}
+        );
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->GetState() == ScriptState::Completed);
+        REQUIRE(script->HasResultValue());
+        
+        auto& func = script->GetResultValue();
+        REQUIRE(func.IsFunction());
+        
+        auto result = func.Call();
+        REQUIRE(result.HasValue());
+        CHECK(result.IsNumber());
+        CHECK(result.ToNumber().value_or(0) == 42);
+    }
+    
+    SECTION("33.2 Call function with args") {
+        auto script = engine.CreateScript(
+            "(function(a, b) { return a + b; });",
+            {.name = "func-args"}
+        );
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->HasResultValue());
+        auto& func = script->GetResultValue();
+        
+        // Create arguments
+        auto argScript1 = engine.CreateScript("10;", {.name = "arg1"});
+        auto argScript2 = engine.CreateScript("20;", {.name = "arg2"});
+        mainEnv->Execute(argScript1);
+        mainEnv->Execute(argScript2);
+        argScript1->Wait(5s);
+        argScript2->Wait(5s);
+        
+        auto& arg1 = argScript1->GetResultValue();
+        auto& arg2 = argScript2->GetResultValue();
+        
+        std::vector<ScriptResult*> args = {&arg1, &arg2};
+        auto result = func.Call(args);
+        
+        REQUIRE(result.HasValue());
+        CHECK(result.ToNumber().value_or(0) == 30);
+    }
+    
+    SECTION("33.3 CallMethod on object") {
+        auto script = engine.CreateScript(
+            "({ value: 10, double: function() { return this.value * 2; } });",
+            {.name = "obj-method"}
+        );
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->HasResultValue());
+        auto& obj = script->GetResultValue();
+        REQUIRE(obj.IsObject());
+        
+        auto result = obj.CallMethod("double");
+        REQUIRE(result.HasValue());
+        CHECK(result.ToNumber().value_or(0) == 20);
+    }
+    
+    SECTION("33.4 Get property from object") {
+        auto script = engine.CreateScript(
+            "({ name: 'test', count: 42 });",
+            {.name = "obj-props"}
+        );
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->HasResultValue());
+        auto& obj = script->GetResultValue();
+        
+        auto name = obj.Get("name");
+        REQUIRE(name.HasValue());
+        CHECK(name.IsString());
+        CHECK(name.ToString() == "test");
+        
+        auto count = obj.Get("count");
+        REQUIRE(count.HasValue());
+        CHECK(count.ToNumber().value_or(0) == 42);
+    }
+    
+    SECTION("33.5 Get element from array") {
+        auto script = engine.CreateScript(
+            "[10, 20, 30];",
+            {.name = "array-elems"}
+        );
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->HasResultValue());
+        auto& arr = script->GetResultValue();
+        REQUIRE(arr.IsArray());
+        
+        auto len = arr.Length();
+        REQUIRE(len.has_value());
+        CHECK(*len == 3);
+        
+        auto elem0 = arr.Get(0u);
+        CHECK(elem0.ToNumber().value_or(0) == 10);
+        
+        auto elem2 = arr.Get(2u);
+        CHECK(elem2.ToNumber().value_or(0) == 30);
+    }
+    
+    SECTION("33.6 Nested property access") {
+        auto script = engine.CreateScript(
+            "({ outer: { inner: { value: 'deep' } } });",
+            {.name = "nested-props"}
+        );
+        auto mainEnv = engine.GetMainEnvironment();
+        mainEnv->Execute(script);
+        script->Wait(5s);
+        
+        REQUIRE(script->HasResultValue());
+        auto& obj = script->GetResultValue();
+        
+        auto deep = obj.Get("outer").Get("inner").Get("value");
+        REQUIRE(deep.HasValue());
+        CHECK(deep.ToString() == "deep");
+    }
+}
+
 
 int main(int argc, char* argv[]) {
     auto& engine = experiments::ScriptEngine::Instance();

@@ -327,12 +327,15 @@ void ScriptEnvironment::ThreadMain() {
                 }
             }
             
+            // Release the isolate lock while waiting for work.
+            // This allows other threads (e.g. ScriptResult::IsNumber) to access the isolate.
             {
+                v8::Unlocker unlocker(isolate);  // Releases the Locker temporarily
                 std::unique_lock lock(queue_mutex_);
                 queue_cv_.wait_for(lock, std::chrono::milliseconds(10), [this] {
                     return !script_queue_.empty() || stop_requested_.load();
                 });
-            }
+            }  // Re-acquires the Locker when Unlocker goes out of scope
         }
         
         // Graceful: process remaining scripts
@@ -394,8 +397,8 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
     auto timeout = script->GetTimeout();
     if (timeout.count() == 0) timeout = config_.default_script_timeout;
     
-    std::atomic<bool> timed_out{false};
-    std::atomic<bool> script_done{false};
+    std::atomic timed_out{false};
+    std::atomic script_done{false};
     std::mutex timeout_mutex;
     std::condition_variable timeout_cv;
     std::thread timeout_thread;
@@ -431,14 +434,14 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
     };
     
     // Compile
-    v8::Local<v8::String> source;
+    v8::Local<v8::String> source; // Script Source as v8::String
     if (!v8::String::NewFromUtf8(isolate, script->GetCode().c_str()).ToLocal(&source)) {
         script->Fail(ScriptError::Make(ErrorCode::InternalError, "Failed to create source"));
         signalTimeoutDone();
         return;
     }
     
-    v8::Local<v8::Script> compiled;
+    v8::Local<v8::Script> compiled; // Compile it as v8::Script
     if (!v8::Script::Compile(setup_->context(), source).ToLocal(&compiled)) {
         ScriptError error{ErrorCode::CompileError, "Compile error"};
         if (try_catch.HasCaught()) {
@@ -457,7 +460,7 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
     }
     
     // Run
-    v8::Local<v8::Value> result;
+    v8::Local<v8::Value> result; // Return Value of the script as v8::Value
     bool success = compiled->Run(setup_->context()).ToLocal(&result);
     
     // Check if we timed out BEFORE signaling the timeout thread
@@ -505,6 +508,11 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
         v8::String::Utf8Value utf8(isolate, result);
         if (*utf8) result_str = *utf8;
     }
+    
+    // Store the raw V8 value in ScriptResult
+    ScriptResult result_value = ScriptResult::Create(isolate, result);
+    result_value.SetStringResult(result_str);
+    script->SetResultValue(std::move(result_value));
     
     {
         std::unique_lock lock(mutex_);

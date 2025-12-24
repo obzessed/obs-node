@@ -23,6 +23,7 @@
 #include "../core/metrics.hpp"
 #include "../config/permissions.hpp"
 #include "../config/script_context.hpp"
+#include "script_result.hpp"
 
 namespace experiments {
 
@@ -167,6 +168,11 @@ public:
     ScriptState GetState() const { return state_.load(std::memory_order_acquire); }
     std::string GetResult() const { std::shared_lock lock(mutex_); return result_; }
     ScriptError GetError() const { std::shared_lock lock(mutex_); return error_; }
+    
+    // Get the raw V8 result value (if available)
+    ScriptResult& GetResultValue() { std::shared_lock lock(mutex_); return result_value_; }
+    const ScriptResult& GetResultValue() const { std::shared_lock lock(mutex_); return result_value_; }
+    bool HasResultValue() const { std::shared_lock lock(mutex_); return result_value_.HasValue(); }
 
     ExecutionMetrics GetMetrics() const { std::shared_lock lock(mutex_); return metrics_; }
 
@@ -238,6 +244,12 @@ private:
         cv_.notify_all();
         if (cb) cb(true, result, ScriptError::None());
     }
+    
+    // Set the raw V8 result value (called by ScriptEnvironment)
+    void SetResultValue(ScriptResult&& value) {
+        std::unique_lock lock(mutex_);
+        result_value_ = std::move(value);
+    }
 
     void Fail(const ScriptError& error) {
         std::unique_lock lock(mutex_);
@@ -293,6 +305,7 @@ private:
 
     std::atomic<ScriptState> state_{ScriptState::Pending};
     std::string result_;
+    ScriptResult result_value_;  // Raw V8 value wrapper
     ScriptError error_;
     ExecutionMetrics metrics_;
     std::atomic<bool> cancel_requested_{false};

@@ -214,7 +214,57 @@ TEST_CASE("Benchmark: ExpressionValue Operators", "[benchmark][expression]") {
     };
 }
 
-int main(int argc, char* argv[])
-{
-    return Catch::Session().run(argc, argv);
+//=============================================================================
+// Script Execution Benchmarks
+//=============================================================================
+
+TEST_CASE("Benchmark: Script Execution", "[benchmark][script]") {
+    auto& engine = ScriptEngine::Instance();
+    // Ensure engine is initialized (done in main, but safe to check)
+    if (!engine.IsInitialized()) {
+        SKIP("ScriptEngine not initialized");
+    }
+
+    BENCHMARK("ExecuteSync simple string") {
+        return engine.ExecuteSync("'hello world'");
+    };
+
+    BENCHMARK("ExecuteSync arithmetic") {
+        return engine.ExecuteSync("1 + 2 * 3 / 4");
+    };
+
+    BENCHMARK("ExecuteSync loop (1000 iter)") {
+        return engine.ExecuteSync(
+            "var sum = 0;"
+            "for (var i = 0; i < 1000; ++i) sum += i;"
+            "sum;"
+        );
+    };
+
+    BENCHMARK("ExecuteSync JSON parse") {
+        return engine.ExecuteSync("JSON.parse('{\"a\":1, \"b\":2, \"c\":3}')");
+    };
+
+    BENCHMARK("ExecuteSync function call") {
+        return engine.ExecuteSync(
+            "(function(x) { return x * x; })(10);"
+        );
+    };
+}
+
+int main(int argc, char* argv[]) {
+    auto& engine = experiments::ScriptEngine::Instance();
+    // Set log level to Warn to keep test output clean, but allow errors
+    engine.SetLogLevel(experiments::LogLevel::Warn);
+    
+    if (!engine.Initialize()) {
+        std::cerr << "FATAL: Failed to initialize ScriptEngine" << std::endl;
+        return 1;
+    }
+
+    int result = Catch::Session().run(argc, argv);
+
+    engine.Shutdown();
+
+    return result;
 }
