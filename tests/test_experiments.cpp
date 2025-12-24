@@ -3768,6 +3768,48 @@ TEST_CASE("Test 43: Modern API", "[script][api]") {
     }
 }
 
+//=============================================================================
+// Test 44: ScriptExtension System
+//=============================================================================
+
+struct TestExtension : public ScriptExtension {
+    std::string GetName() const override { return "TestExtension"; }
+    void Install(ScriptEnvironment* env) override {
+        // Bind a custom function
+        env->Bind("extAdd", [](const std::vector<ScriptValue>& args) -> ScriptValue {
+             double sum = 0;
+             if (args.empty()) return ScriptValue();
+             
+             ScriptEnvironment* env_ptr = args[0].GetEnvironment();
+             for(auto& arg : args) sum += arg.ToNumber().value_or(0);
+             
+             auto id = env_ptr->CreateNumber(sum);
+             return ScriptValue(env_ptr, id);
+        });
+        
+        // Set a global value
+        env->SetGlobal("extVersion", 1.0);
+    }
+};
+
+TEST_CASE("Test 44: ScriptExtension", "[script][extension]") {
+    auto& engine = ScriptEngine::Instance();
+    auto env = engine.GetMainEnvironment();
+    REQUIRE(env);
+    
+    auto ext = std::make_shared<TestExtension>();
+    env->RegisterExtension(ext);
+    
+    // Verify global
+    auto ver = env->GetGlobal("extVersion");
+    CHECK(env->ValueToNumber(ver).value_or(0) == 1.0);
+    
+    // Verify function
+    auto result = env->ExecuteSync("extAdd(10, 5, 2)");
+    CHECK(result.IsOk());
+    CHECK(result.Value().ToNumber().value_or(0) == 17.0);
+}
+
 int main(int argc, char* argv[]) {
     auto& engine = ScriptEngine::Instance();
     // Set log level to Error to keep test output clean (suppresses warnings)

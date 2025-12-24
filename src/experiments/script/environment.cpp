@@ -147,6 +147,8 @@ struct ScriptEnvironment::Impl {
     
     std::list<NativeFunctionData> native_functions_;
     mutable std::mutex native_functions_mutex_;
+    
+    std::vector<std::shared_ptr<ScriptExtension>> extensions_;
 
     Impl(EnvironmentId id, node::MultiIsolatePlatform* platform,
          std::vector<std::string> args, std::vector<std::string> exec_args,
@@ -203,6 +205,12 @@ bool ScriptEnvironment::Initialize() {
         v8::Locker locker(isolate);
         // Note: ResourceConstraints should be set before isolate creation
         // For existing isolate, we can use SetRAILMode or similar
+    }
+    
+    // Install extensions
+    for (auto& ext : impl_->extensions_) {
+        LOG_INFO("Environment", "Installing extension: " + ext->GetName());
+        ext->Install(this);
     }
     
     impl_->initialized_.store(true, std::memory_order_release);
@@ -1907,6 +1915,19 @@ ScriptContextPtr ScriptEnvironment::GetContext() const
 
 node::CommonEnvironmentSetup* ScriptEnvironment::GetSetup() const {
     return impl_->setup_.get();
+}
+
+void ScriptEnvironment::RegisterExtension(std::shared_ptr<ScriptExtension> extension) {
+    if (!extension) return;
+    
+    // If already initialized, install immediately
+    if (IsInitialized()) {
+        std::lock_guard<std::shared_mutex> lock(impl_->mutex_); // Protect if needed, though Install handles its own locking usually
+        LOG_INFO("Environment", "Installing extension (runtime): " + extension->GetName());
+        extension->Install(this);
+    }
+    
+    impl_->extensions_.push_back(extension);
 }
 
 } // namespace experiments

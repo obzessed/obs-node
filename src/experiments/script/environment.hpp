@@ -55,6 +55,13 @@ namespace experiments {
 // ScriptEnvironment - Enhanced with config, metrics, graceful shutdown
 //=============================================================================
 
+// Extensions interface
+struct ScriptExtension {
+    virtual ~ScriptExtension() = default;
+    virtual std::string GetName() const = 0;
+    virtual void Install(ScriptEnvironment* env) = 0;
+};
+
 class ScriptEnvironment : public std::enable_shared_from_this<ScriptEnvironment> {
 public:
     using EnvironmentId = uint64_t;
@@ -140,6 +147,9 @@ public:
     IsolationLevel GetIsolationLevel() const;
     bool CanAccess(const std::string& capability) const;  // Check if capability is allowed
     
+    // Extensions
+    void RegisterExtension(std::shared_ptr<ScriptExtension> extension);
+
     // Directive hooks (e.g., "use obs"; -> injects obs global)
     using DirectiveHandler = std::function<void(ScriptEnvironment*, const std::string& directive)>;
     void RegisterDirective(const std::string& name, DirectiveHandler handler);
