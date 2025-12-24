@@ -6,6 +6,7 @@
 
 #include <string>
 #include <variant>
+#include <optional>
 
 namespace experiments {
 
@@ -63,8 +64,71 @@ public:
         return IsOk() ? Value() : default_value;
     }
     
+    // Monadic operations
+    
+    // Map: Transform value if Ok, pass through error if Error
+    template<typename Fn>
+    auto Map(Fn&& fn) const -> Result<decltype(fn(std::declval<T>()))> {
+        using U = decltype(fn(std::declval<T>()));
+        if (IsOk()) {
+            return Result<U>(fn(Value()));
+        }
+        return Result<U>(Error());
+    }
+    
+    // FlatMap: Chain Result-returning functions
+    template<typename Fn>
+    auto FlatMap(Fn&& fn) const -> decltype(fn(std::declval<T>())) {
+        using ResultU = decltype(fn(std::declval<T>()));
+        if (IsOk()) {
+            return fn(Value());
+        }
+        return ResultU(Error());
+    }
+    
+    // MapError: Transform error if Error, pass through value if Ok
+    template<typename Fn>
+    Result<T> MapError(Fn&& fn) const {
+        if (IsError()) {
+            return Result<T>(fn(Error()));
+        }
+        return *this;
+    }
+    
 private:
     std::variant<T, ScriptError> data_;
+};
+
+//=============================================================================
+// Result<void> Specialization
+//=============================================================================
+
+template<>
+class Result<void> {
+public:
+    Result() : error_(std::nullopt) {}
+    Result(ScriptError error) : error_(std::move(error)) {}
+    
+    static Result Ok() { return Result(); }
+    static Result Err(ScriptError error) { return Result(std::move(error)); }
+    
+    bool IsOk() const { return !error_.has_value(); }
+    bool IsError() const { return error_.has_value(); }
+    
+    ScriptError& Error() { return error_.value(); }
+    const ScriptError& Error() const { return error_.value(); }
+    
+    // MapError: Transform error if Error
+    template<typename Fn>
+    Result<void> MapError(Fn&& fn) const {
+        if (IsError()) {
+            return Result<void>(fn(Error()));
+        }
+        return *this;
+    }
+    
+private:
+    std::optional<ScriptError> error_;
 };
 
 } // namespace experiments

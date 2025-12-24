@@ -263,6 +263,7 @@ private:
         Eof, Identifier, Number, String, StringInterpolated,
         Plus, Minus, Multiply, Divide, Equal, NotEqual,
         Less, LessEqual, Greater, GreaterEqual,
+        And, Or, Not,  // Logical operators
         Assign, LParen, RParen, LBrace, RBrace, Comma, Semicolon,
         KeywordLet, KeywordConst, KeywordIf, KeywordElse,
         KeywordTrue, KeywordFalse, KeywordNull,
@@ -322,8 +323,15 @@ private:
                         break;
                     case '=': AddToken(tokens, Match('=') ? TokenType::Equal : TokenType::Assign); break;
                     case '!':
-                        if (Match('=')) AddToken(tokens, TokenType::NotEqual);
-                        else throw std::runtime_error("Unexpected character '!'");
+                        AddToken(tokens, Match('=') ? TokenType::NotEqual : TokenType::Not);
+                        break;
+                    case '&':
+                        if (Match('&')) AddToken(tokens, TokenType::And);
+                        else throw std::runtime_error("Unexpected character '&', did you mean '&&'?");
+                        break;
+                    case '|':
+                        if (Match('|')) AddToken(tokens, TokenType::Or);
+                        else throw std::runtime_error("Unexpected character '|', did you mean '||'?");
                         break;
                     case '<': AddToken(tokens, Match('=') ? TokenType::LessEqual : TokenType::Less); break;
                     case '>': AddToken(tokens, Match('=') ? TokenType::GreaterEqual : TokenType::Greater); break;
@@ -492,23 +500,58 @@ private:
 
         ExpressionValue ParseLogicalOr() {
              ExpressionValue left = ParseLogicalAnd();
-             // TODO: 'or' keyword or '||' operator support
+             while (Match(TokenType::Or)) {
+                 // Short-circuit: if left is truthy, skip right
+                 if (left.AsBoolean()) {
+                     ParseLogicalAnd(); // Parse but discard
+                     continue;
+                 }
+                 ExpressionValue right = ParseLogicalAnd();
+                 left = ExpressionValue(left.AsBoolean() || right.AsBoolean());
+             }
              return left;
         }
 
         ExpressionValue ParseLogicalAnd() {
             ExpressionValue left = ParseEquality();
-            // TODO: 'and' keyword or '&&' operator support
+            while (Match(TokenType::And)) {
+                // Short-circuit: if left is falsy, skip right
+                if (!left.AsBoolean()) {
+                    ParseEquality(); // Parse but discard
+                    continue;
+                }
+                ExpressionValue right = ParseEquality();
+                left = ExpressionValue(left.AsBoolean() && right.AsBoolean());
+            }
             return left;
         }
 
         ExpressionValue ParseEquality() {
-            ExpressionValue left = ParseAdditive();
+            ExpressionValue left = ParseComparison();
             while (Match(TokenType::Equal) || Match(TokenType::NotEqual)) {
                 TokenType op = Previous().type;
-                ExpressionValue right = ParseAdditive();
+                ExpressionValue right = ParseComparison();
                 if (op == TokenType::Equal) left = ExpressionValue(left == right);
                 else left = ExpressionValue(left != right);
+            }
+            return left;
+        }
+
+        ExpressionValue ParseComparison() {
+            ExpressionValue left = ParseAdditive();
+            while (Match(TokenType::Less) || Match(TokenType::LessEqual) ||
+                   Match(TokenType::Greater) || Match(TokenType::GreaterEqual)) {
+                TokenType op = Previous().type;
+                ExpressionValue right = ParseAdditive();
+                double l = left.AsNumber();
+                double r = right.AsNumber();
+                switch (op) {
+                    case TokenType::Less: left = ExpressionValue(l < r); break;
+                    case TokenType::LessEqual: left = ExpressionValue(l <= r); break;
+                    case TokenType::Greater: left = ExpressionValue(l > r); break;
+                    case TokenType::GreaterEqual: left = ExpressionValue(l >= r); break;
+                    default: break;
+                }
             }
             return left;
         }
@@ -542,6 +585,7 @@ private:
         ExpressionValue ParseUnary() {
             if (Match(TokenType::Minus)) return ExpressionValue(-ParseUnary().AsNumber());
             if (Match(TokenType::Plus)) return ParseUnary(); // +x is just x
+            if (Match(TokenType::Not)) return ExpressionValue(!ParseUnary().AsBoolean());
             return ParsePrimary();
         }
 

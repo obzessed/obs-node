@@ -15,6 +15,8 @@
 #include <atomic>
 #include <shared_mutex>
 #include <condition_variable>
+#include <unordered_map>
+#include <random>
 
 #include "../core/error.hpp"
 #include "../core/metrics.hpp"
@@ -100,6 +102,34 @@ public:
     std::string GetSourceFile() const { return source_file_; }
     std::string GetAuthor() const { return author_; }
     bool IsTrusted() const { return trusted_; }
+
+    // Metadata accessors
+    void SetMetadata(const std::string& key, const std::string& value) {
+        std::unique_lock lock(mutex_);
+        metadata_[key] = value;
+    }
+    
+    std::optional<std::string> GetMetadata(const std::string& key) const {
+        std::shared_lock lock(mutex_);
+        auto it = metadata_.find(key);
+        if (it != metadata_.end()) return it->second;
+        return std::nullopt;
+    }
+    
+    bool HasMetadata(const std::string& key) const {
+        std::shared_lock lock(mutex_);
+        return metadata_.find(key) != metadata_.end();
+    }
+    
+    std::unordered_map<std::string, std::string> GetAllMetadata() const {
+        std::shared_lock lock(mutex_);
+        return metadata_;
+    }
+    
+    void ClearMetadata() {
+        std::unique_lock lock(mutex_);
+        metadata_.clear();
+    }
 
     // Check if script has a specific permission (requires environment context)
     bool HasPermission(ScriptPermission perm) const {
@@ -207,8 +237,25 @@ private:
     }
 
     static std::string GenerateId() {
-        static std::atomic<uint64_t> counter{0};
-        return "script_" + std::to_string(++counter);
+        // Generate UUID-like ID: 8-4-4-4-12 hex format
+        static std::random_device rd;
+        static std::mt19937_64 gen(rd());
+        static std::uniform_int_distribution<uint64_t> dist;
+        
+        auto hex = [](uint64_t val, size_t len) {
+            static const char* hexchars = "0123456789abcdef";
+            std::string result;
+            result.reserve(len);
+            for (size_t i = 0; i < len; i++) {
+                result += hexchars[(val >> ((len - 1 - i) * 4)) & 0xF];
+            }
+            return result;
+        };
+        
+        uint64_t a = dist(gen);
+        uint64_t b = dist(gen);
+        return hex(a >> 32, 8) + "-" + hex(a >> 16, 4) + "-" + 
+               hex(a, 4) + "-" + hex(b >> 48, 4) + "-" + hex(b, 12);
     }
 
     std::string code_;
@@ -228,6 +275,9 @@ private:
     std::string source_file_;
     std::string author_;
     bool trusted_{false};
+
+    // Metadata storage
+    std::unordered_map<std::string, std::string> metadata_;
 
     mutable std::shared_mutex mutex_;
     std::condition_variable_any cv_;

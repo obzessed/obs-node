@@ -165,7 +165,7 @@ endif()
 # ============================================================================
 # Testing with CTest and Catch2
 # ============================================================================
-option(BUILD_TESTING "Build tests" ON)
+option(BUILD_TESTS "Build tests" ON)
 option(BUILD_LIBNODE_TEST "Build standalone libnode test executable" ON)
 
 file(GLOB_RECURSE EXPERIMENT_SOURCES
@@ -174,7 +174,7 @@ file(GLOB_RECURSE EXPERIMENT_SOURCES
     src/experiments/*.cpp
 )
 
-if(BUILD_TESTING)
+if(BUILD_TESTS)
   enable_testing()
   include(CTest)
   
@@ -213,7 +213,7 @@ if(BUILD_LIBNODE_TEST)
     endif()
   endif()
 
-  # Legacy test executable (non-Catch2)
+  # Legacy complex test executable (non-Catch2)
   # TODO: legacy tests
   add_executable(test-libnode-multi tests/test-libnode-multi.cc)
   target_sources(test-libnode-multi PRIVATE ${EXPERIMENT_SOURCES})
@@ -282,7 +282,7 @@ if(BUILD_LIBNODE_TEST)
   endif()
 
   # Register tests with CTest
-  if(BUILD_TESTING)
+  if(BUILD_TESTS)
     catch_discover_tests(${LIBNODE_TEST_TARGET})
   endif()
 endif()

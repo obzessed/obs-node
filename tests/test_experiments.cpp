@@ -1513,6 +1513,304 @@ TEST_CASE("Test 17: Background Services", "[services]") {
     }
 }
 
+//=============================================================================
+// NEW FEATURE TESTS (18-23)
+//=============================================================================
+
+TEST_CASE("Test 18: Result Monads", "[core][result]") {
+    SECTION("18.1 Map") {
+        Result<int> ok(42);
+        auto mapped = ok.Map([](int x) { return x * 2; });
+        REQUIRE(mapped.IsOk());
+        CHECK(mapped.Value() == 84);
+
+        Result<int> err(ScriptError::Make(ErrorCode::RuntimeError, "fail"));
+        auto mapped_err = err.Map([](int x) { return x * 2; });
+        REQUIRE(mapped_err.IsError());
+        CHECK(mapped_err.Error().code == ErrorCode::RuntimeError);
+    }
+
+    SECTION("18.2 FlatMap") {
+        auto divide = [](int x) -> Result<int> {
+            if (x == 0) return ScriptError::Make(ErrorCode::InvalidArgument, "div by zero");
+            return 100 / x;
+        };
+
+        Result<int> ok(5);
+        auto result = ok.FlatMap(divide);
+        REQUIRE(result.IsOk());
+        CHECK(result.Value() == 20);
+
+        Result<int> zero(0);
+        auto fail_result = zero.FlatMap(divide);
+        REQUIRE(fail_result.IsError());
+    }
+
+    SECTION("18.3 MapError") {
+        Result<int> err(ScriptError::Make(ErrorCode::RuntimeError, "original"));
+        auto mapped = err.MapError([](const ScriptError& e) {
+            return ScriptError::Make(ErrorCode::InternalError, "wrapped: " + e.message);
+        });
+        REQUIRE(mapped.IsError());
+        CHECK(mapped.Error().code == ErrorCode::InternalError);
+        CHECK(mapped.Error().message.find("wrapped") != std::string::npos);
+    }
+
+    SECTION("18.4 Result<void>") {
+        Result<void> ok = Result<void>::Ok();
+        CHECK(ok.IsOk());
+        CHECK(!ok.IsError());
+
+        Result<void> err = Result<void>::Err(ScriptError::Make(ErrorCode::FileNotFound, "missing"));
+        CHECK(err.IsError());
+        CHECK(err.Error().code == ErrorCode::FileNotFound);
+    }
+}
+
+TEST_CASE("Test 19: Logger Features", "[core][logger]") {
+    SECTION("19.1 Log Format") {
+        auto& logger = Logger::Instance();
+        auto original = logger.GetFormat();
+
+        logger.SetFormat(LogFormat::Json);
+        CHECK(logger.GetFormat() == LogFormat::Json);
+
+        logger.SetFormat(LogFormat::Text);
+        CHECK(logger.GetFormat() == LogFormat::Text);
+
+        logger.SetFormat(original);
+    }
+
+    SECTION("19.2 Log Entry") {
+        LogEntry entry(LogLevel::Info, "test", "message");
+        CHECK(entry.level == LogLevel::Info);
+        CHECK(entry.category == "test");
+        CHECK(entry.message == "message");
+    }
+
+    SECTION("19.3 Formatters") {
+        LogEntry entry(LogLevel::Warn, "cat", "msg");
+
+        TextLogFormatter text;
+        std::string text_out = text.Format(entry);
+        CHECK(text_out.find("[WARN]") != std::string::npos);
+        CHECK(text_out.find("[cat]") != std::string::npos);
+
+        JsonLogFormatter json;
+        std::string json_out = json.Format(entry);
+        CHECK(json_out.find("\"level\":\"WARN\"") != std::string::npos);
+        CHECK(json_out.find("\"category\":\"cat\"") != std::string::npos);
+    }
+
+    SECTION("19.4 AsyncLogger") {
+        AsyncLogger async;
+        std::atomic<int> count{0};
+
+        async.SetCallback([&count](const LogEntry&) { count++; });
+        async.SetMinLevel(LogLevel::Info);
+        async.Start();
+
+        CHECK(async.IsRunning());
+
+        async.Log(LogLevel::Info, "test", "msg1");
+        async.Log(LogLevel::Info, "test", "msg2");
+
+        async.Flush();
+        async.Stop();
+
+        CHECK(!async.IsRunning());
+        CHECK(count >= 2);
+    }
+}
+
+TEST_CASE("Test 20: Script Metadata", "[script][metadata]") {
+    SECTION("20.1 UUID Generation") {
+        auto script1 = std::make_shared<Script>("'test';");
+        auto script2 = std::make_shared<Script>("'test';");
+
+        std::string id1 = script1->GetName();
+        std::string id2 = script2->GetName();
+
+        CHECK(id1 != id2);
+        CHECK(id1.find("-") != std::string::npos);  // UUID format has dashes
+    }
+
+    SECTION("20.2 Metadata CRUD") {
+        auto script = std::make_shared<Script>("'test';");
+
+        script->SetMetadata("key1", "value1");
+        script->SetMetadata("key2", "value2");
+
+        CHECK(script->HasMetadata("key1"));
+        CHECK(script->HasMetadata("key2"));
+        CHECK(!script->HasMetadata("key3"));
+
+        auto val1 = script->GetMetadata("key1");
+        REQUIRE(val1.has_value());
+        CHECK(*val1 == "value1");
+
+        auto val3 = script->GetMetadata("key3");
+        CHECK(!val3.has_value());
+    }
+
+    SECTION("20.3 GetAllMetadata") {
+        auto script = std::make_shared<Script>("'test';");
+        script->SetMetadata("a", "1");
+        script->SetMetadata("b", "2");
+
+        auto all = script->GetAllMetadata();
+        CHECK(all.size() == 2);
+        CHECK(all["a"] == "1");
+        CHECK(all["b"] == "2");
+    }
+
+    SECTION("20.4 ClearMetadata") {
+        auto script = std::make_shared<Script>("'test';");
+        script->SetMetadata("key", "val");
+        CHECK(script->HasMetadata("key"));
+
+        script->ClearMetadata();
+        CHECK(!script->HasMetadata("key"));
+    }
+}
+
+TEST_CASE("Test 21: Thread Safety Utilities", "[core][thread]") {
+    SECTION("21.1 ThreadSafeMap Basic") {
+        ThreadSafeMap<std::string, int> map;
+
+        map.Set("a", 1);
+        map.Set("b", 2);
+
+        CHECK(map.Has("a"));
+        CHECK(map.Has("b"));
+        CHECK(!map.Has("c"));
+
+        auto val = map.Get("a");
+        REQUIRE(val.has_value());
+        CHECK(*val == 1);
+
+        CHECK(map.GetOr("c", 99) == 99);
+        CHECK(map.Size() == 2);
+    }
+
+    SECTION("21.2 ThreadSafeMap Remove/Clear") {
+        ThreadSafeMap<int, std::string> map;
+        map.Set(1, "one");
+        map.Set(2, "two");
+
+        CHECK(map.Remove(1));
+        CHECK(!map.Has(1));
+        CHECK(map.Size() == 1);
+
+        map.Clear();
+        CHECK(map.Empty());
+    }
+
+    SECTION("21.3 ThreadSafeMap Concurrent") {
+        ThreadSafeMap<int, int> map;
+        std::vector<std::thread> threads;
+
+        for (int i = 0; i < 10; i++) {
+            threads.emplace_back([&map, i] {
+                map.Set(i, i * 10);
+                std::this_thread::sleep_for(1ms);
+                map.Get(i);
+            });
+        }
+
+        for (auto& t : threads) t.join();
+
+        CHECK(map.Size() == 10);
+    }
+
+    SECTION("21.4 ThreadSafeValue") {
+        ThreadSafeValue<int> val(0);
+
+        CHECK(val.Get() == 0);
+
+        val.Set(42);
+        CHECK(val.Get() == 42);
+
+        val.Apply([](int& v) { v *= 2; });
+        CHECK(val.Get() == 84);
+    }
+}
+
+TEST_CASE("Test 22: Expression Operators", "[expression][operators]") {
+    ExpressionEngine engine;
+
+    SECTION("22.1 Comparison Operators") {
+        CHECK(engine.Evaluate("5 < 10").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("10 < 5").value.AsBoolean() == false);
+        CHECK(engine.Evaluate("5 <= 5").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("5 > 3").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("5 >= 5").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("5 >= 6").value.AsBoolean() == false);
+    }
+
+    SECTION("22.2 Logical AND") {
+        CHECK(engine.Evaluate("true && true").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("true && false").value.AsBoolean() == false);
+        CHECK(engine.Evaluate("false && true").value.AsBoolean() == false);
+        CHECK(engine.Evaluate("false && false").value.AsBoolean() == false);
+    }
+
+    SECTION("22.3 Logical OR") {
+        CHECK(engine.Evaluate("true || true").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("true || false").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("false || true").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("false || false").value.AsBoolean() == false);
+    }
+
+    SECTION("22.4 Logical NOT") {
+        CHECK(engine.Evaluate("!true").value.AsBoolean() == false);
+        CHECK(engine.Evaluate("!false").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("!!true").value.AsBoolean() == true);
+    }
+
+    SECTION("22.5 Combined Logic") {
+        CHECK(engine.Evaluate("(5 > 3) && (10 < 20)").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("(5 < 3) || (10 > 5)").value.AsBoolean() == true);
+        CHECK(engine.Evaluate("!(5 > 10)").value.AsBoolean() == true);
+    }
+}
+
+TEST_CASE("Test 23: Sandbox Path Security", "[isolation][sandbox]") {
+    SECTION("23.1 NormalizePath") {
+        std::string norm = SandboxGuard::NormalizePath(".");
+        CHECK(!norm.empty());
+
+        // Non-existent path should still normalize
+        std::string fake = SandboxGuard::NormalizePath("./fake/path/file.txt");
+        CHECK(!fake.empty());
+    }
+
+    SECTION("23.2 IsPathContained") {
+        // Same directory should be contained
+        std::string cwd = SandboxGuard::NormalizePath(".");
+        CHECK(SandboxGuard::IsPathContained(cwd, cwd));
+    }
+
+    SECTION("23.3 Traversal Detection") {
+        SandboxConfig config;
+        config.allowed_read_paths = {"./safe"};
+        SandboxGuard guard(config);
+
+        // If you try to read from a path with .., it should detect
+        // Note: exact behavior depends on file system state
+        CHECK(!guard.CheckFileRead("./safe/../../../etc/passwd"));
+    }
+
+    SECTION("23.4 Blocked Paths") {
+        SandboxConfig config;
+        config.blocked_paths = {"./blocked"};
+        SandboxGuard guard(config);
+
+        CHECK(!guard.CheckFileRead("./blocked/file.txt"));
+    }
+}
+
+
 int main(int argc, char* argv[]) {
     auto& engine = experiments::ScriptEngine::Instance();
     // Set log level to Warn to keep test output clean, but allow errors

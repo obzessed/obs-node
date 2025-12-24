@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <memory>
 #include <algorithm>
+#include <filesystem>
 
 #include "audit.hpp"
 
@@ -174,6 +175,43 @@ public:
     }
 
     const SandboxConfig& GetConfig() const { return config_; }
+    
+    // Utility: Normalize and canonicalize a path
+    static std::string NormalizePath(const std::string& path) {
+        try {
+            namespace fs = std::filesystem;
+            fs::path p(path);
+            
+            // If path exists, use canonical (resolves symlinks and ..)
+            if (fs::exists(p)) {
+                return fs::canonical(p).string();
+            }
+            
+            // For non-existent paths, use weakly_canonical (normalizes without symlink resolution)
+            return fs::weakly_canonical(p).string();
+        } catch (...) {
+            // If filesystem operations fail, return empty to indicate invalid
+            return "";
+        }
+    }
+    
+    // Check if target path is contained within base path
+    static bool IsPathContained(const std::string& target, const std::string& base) {
+        std::string norm_target = NormalizePath(target);
+        std::string norm_base = NormalizePath(base);
+        
+        if (norm_target.empty() || norm_base.empty()) {
+            return false;
+        }
+        
+        // Ensure base ends with separator for proper prefix check
+        if (!norm_base.empty() && norm_base.back() != '/' && norm_base.back() != '\\') {
+            norm_base += std::filesystem::path::preferred_separator;
+        }
+        
+        // Check if target starts with base
+        return norm_target.starts_with(norm_base) || norm_target == norm_base.substr(0, norm_base.size() - 1);
+    }
 
 private:
     SandboxConfig config_;
@@ -182,15 +220,28 @@ private:
     bool CheckPathAccess(const std::string& path,
                          const std::vector<std::string>& allowed,
                          const std::string& op) const {
-        // Always block dangerous paths
-        if (path.find("..") != std::string::npos) {
-            LogViolation(op + " path traversal", path);
+        // Normalize the path first
+        std::string normalized = NormalizePath(path);
+        if (normalized.empty()) {
+            LogViolation(op + " invalid path", path);
             return false;
+        }
+        
+        // Check for traversal attempts (in original path - before normalization)
+        // This catches obvious attempts even if they'd be normalized away
+        if (path.find("..") != std::string::npos) {
+            // Verify the normalized path doesn't escape
+            std::string cwd = NormalizePath(".");
+            if (!cwd.empty() && !IsPathContained(normalized, cwd)) {
+                LogViolation(op + " path traversal", path);
+                return false;
+            }
         }
 
         // Check blocked paths
         for (const auto& blocked : config_.blocked_paths) {
-            if (path.starts_with(blocked)) {
+            std::string norm_blocked = NormalizePath(blocked);
+            if (!norm_blocked.empty() && IsPathContained(normalized, norm_blocked)) {
                 LogViolation(op + " blocked path", path);
                 return false;
             }
@@ -200,7 +251,7 @@ private:
         if (!allowed.empty()) {
             bool in_allowed = false;
             for (const auto& allowed_path : allowed) {
-                if (path.starts_with(allowed_path)) {
+                if (IsPathContained(normalized, allowed_path)) {
                     in_allowed = true;
                     break;
                 }
@@ -222,3 +273,4 @@ private:
 };
 
 } // namespace experiments
+
