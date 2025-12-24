@@ -10,6 +10,7 @@
 !/data
 !/docs
 !/src
+!/tests
 !/typings
 !.clang-format
 !.gersemirc
