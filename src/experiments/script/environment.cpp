@@ -149,6 +149,9 @@ struct ScriptEnvironment::Impl {
     mutable std::mutex native_functions_mutex_;
     
     std::vector<std::shared_ptr<ScriptExtension>> extensions_;
+    
+    // Unhandled promise rejection callback
+    ScriptEnvironment::UnhandledRejectionCallback unhandled_rejection_callback_;
 
     Impl(EnvironmentId id, node::MultiIsolatePlatform* platform,
          std::vector<std::string> args, std::vector<std::string> exec_args,
@@ -492,6 +495,150 @@ ScriptResult ScriptEnvironment::ExecuteSyncAwait(const std::string& code, std::c
     resolved_value.SetStringResult(result_str);
     
     return ScriptResult::Ok(std::move(resolved_value));
+}
+
+ScriptResult ScriptEnvironment::ExecuteModule(const std::string& code, const std::string& module_name,
+                                               std::chrono::milliseconds timeout) {
+    if (!impl_->setup_ || !impl_->initialized_.load()) {
+        return ScriptResult::Err(ErrorCode::InternalError, "Environment not initialized");
+    }
+    
+    v8::Isolate* isolate = impl_->setup_->isolate();
+    
+    // Globals to store across locker scopes
+    v8::Global<v8::Promise>* promise_global = nullptr;
+    v8::Global<v8::Module>* module_global = nullptr;
+    bool is_promise = false;
+    
+    // Phase 1: Compile, instantiate, and start evaluation (with Locker)
+    {
+        v8::Locker locker(isolate);
+        v8::Isolate::Scope isolate_scope(isolate);
+        v8::HandleScope handle_scope(isolate);
+        v8::Local<v8::Context> context = impl_->setup_->context();
+        v8::Context::Scope context_scope(context);
+        
+        v8::TryCatch try_catch(isolate);
+        
+        // Create module source
+        v8::Local<v8::String> source_text;
+        if (!v8::String::NewFromUtf8(isolate, code.c_str()).ToLocal(&source_text)) {
+            return ScriptResult::Err(ErrorCode::CompileError, "Failed to create source string");
+        }
+        
+        // Create script origin with module flag
+        v8::ScriptOrigin origin(
+            v8::String::NewFromUtf8(isolate, module_name.c_str()).ToLocalChecked(),
+            0, 0, false, -1, v8::Local<v8::Value>(), false, false, true
+        );
+        
+        // Compile as module
+        v8::ScriptCompiler::Source module_source(source_text, origin);
+        v8::Local<v8::Module> module;
+        if (!v8::ScriptCompiler::CompileModule(isolate, &module_source).ToLocal(&module)) {
+            if (try_catch.HasCaught()) {
+                v8::String::Utf8Value error(isolate, try_catch.Exception());
+                return ScriptResult::Err(ErrorCode::CompileError, *error ? *error : "Compile failed");
+            }
+            return ScriptResult::Err(ErrorCode::CompileError, "Module compilation failed");
+        }
+        
+        // Module resolution callback
+        auto resolve_callback = [](v8::Local<v8::Context> ctx,
+                                   v8::Local<v8::String> specifier,
+                                   v8::Local<v8::FixedArray>,
+                                   v8::Local<v8::Module>) -> v8::MaybeLocal<v8::Module> {
+            v8::Isolate* iso = ctx->GetIsolate();
+            iso->ThrowException(v8::Exception::Error(
+                v8::String::NewFromUtf8(iso, "Module imports not supported").ToLocalChecked()
+            ));
+            return v8::MaybeLocal<v8::Module>();
+        };
+        
+        // Instantiate module
+        if (!module->InstantiateModule(context, resolve_callback).FromMaybe(false)) {
+            if (try_catch.HasCaught()) {
+                v8::String::Utf8Value error(isolate, try_catch.Exception());
+                return ScriptResult::Err(ErrorCode::RuntimeError, *error ? *error : "Instantiation failed");
+            }
+            return ScriptResult::Err(ErrorCode::RuntimeError, "Module instantiation failed");
+        }
+        
+        // Evaluate module
+        v8::Local<v8::Value> eval_result;
+        if (!module->Evaluate(context).ToLocal(&eval_result)) {
+            if (try_catch.HasCaught()) {
+                v8::String::Utf8Value error(isolate, try_catch.Exception());
+                return ScriptResult::Err(ErrorCode::RuntimeError, *error ? *error : "Evaluation failed");
+            }
+            return ScriptResult::Err(ErrorCode::RuntimeError, "Module evaluation failed");
+        }
+        
+        // Check if result is a promise (TLA case)
+        if (eval_result->IsPromise()) {
+            is_promise = true;
+            promise_global = new v8::Global<v8::Promise>(isolate, eval_result.As<v8::Promise>());
+            module_global = new v8::Global<v8::Module>(isolate, module);
+        } else {
+            // Non-promise result (no TLA)
+            v8::Local<v8::Object> ns = module->GetModuleNamespace().As<v8::Object>();
+            ValueId ns_id = RegisterValue(&ns);
+            ScriptValue result_value(this, ns_id);
+            return ScriptResult::Ok(std::move(result_value));
+        }
+    } // Locker released here
+    
+    // Phase 2: Poll the promise (TLA wait loop, without holding Locker)
+    auto start = std::chrono::steady_clock::now();
+    
+    while (true) {
+        v8::Promise::PromiseState state;
+        
+        {
+            v8::Locker locker(isolate);
+            v8::Isolate::Scope isolate_scope(isolate);
+            v8::HandleScope handle_scope(isolate);
+            v8::Local<v8::Context> context = impl_->setup_->context();
+            v8::Context::Scope context_scope(context);
+            
+            // Process pending timers and tasks while holding locker
+            uv_loop_t* loop = impl_->setup_->event_loop();
+            uv_run(loop, UV_RUN_NOWAIT);
+            impl_->platform_->DrainTasks(isolate);
+            isolate->PerformMicrotaskCheckpoint();
+            
+            v8::Local<v8::Promise> promise = promise_global->Get(isolate);
+            state = promise->State();
+            
+            if (state == v8::Promise::kFulfilled) {
+                v8::Local<v8::Module> mod = module_global->Get(isolate);
+                v8::Local<v8::Object> ns = mod->GetModuleNamespace().As<v8::Object>();
+                ValueId ns_id = RegisterValue(&ns);
+                
+                delete promise_global;
+                delete module_global;
+                
+                ScriptValue result_value(this, ns_id);
+                return ScriptResult::Ok(std::move(result_value));
+            } else if (state == v8::Promise::kRejected) {
+                v8::Local<v8::Value> reason = promise->Result();
+                v8::String::Utf8Value utf8(isolate, reason);
+                std::string error_msg = *utf8 ? *utf8 : "Module rejected";
+                
+                delete promise_global;
+                delete module_global;
+                return ScriptResult::Err(ErrorCode::RuntimeError, error_msg);
+            }
+        } // Locker released
+        
+        if (std::chrono::steady_clock::now() - start > timeout) {
+            delete promise_global;
+            delete module_global;
+            return ScriptResult::Err(ErrorCode::Timeout, "Module evaluation timed out (TLA)");
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }
 
 CompiledScriptPtr ScriptEnvironment::Compile(const std::string& code, const std::string& name) {
@@ -2129,6 +2276,66 @@ ScriptResult ScriptEnvironment::AwaitPromise(ValueId promise_id, std::chrono::mi
         
         // Sleep without holding the Locker, allowing env thread to work
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+void ScriptEnvironment::SetUnhandledRejectionHandler(UnhandledRejectionCallback callback) {
+    impl_->unhandled_rejection_callback_ = std::move(callback);
+    
+    // Register V8's promise reject callback if we have a setup
+    if (impl_->setup_) {
+        v8::Isolate* isolate = impl_->setup_->isolate();
+        v8::Locker locker(isolate);
+        v8::Isolate::Scope isolate_scope(isolate);
+        
+        // Store self reference for the static callback
+        isolate->SetData(1, this);
+        
+        // Register the callback
+        isolate->SetPromiseRejectCallback([](v8::PromiseRejectMessage message) {
+            v8::Isolate* isolate = v8::Isolate::GetCurrent();
+            ScriptEnvironment* self = static_cast<ScriptEnvironment*>(isolate->GetData(1));
+            if (!self || !self->impl_->unhandled_rejection_callback_) return;
+            
+            v8::HandleScope handle_scope(isolate);
+            
+            PromiseRejectEvent event;
+            switch (message.GetEvent()) {
+                case v8::kPromiseRejectWithNoHandler:
+                    event = PromiseRejectEvent::Unhandled;
+                    break;
+                case v8::kPromiseHandlerAddedAfterReject:
+                    event = PromiseRejectEvent::HandlerAdded;
+                    break;
+                case v8::kPromiseRejectAfterResolved:
+                    event = PromiseRejectEvent::RejectAfterResolve;
+                    break;
+                case v8::kPromiseResolveAfterResolved:
+                    event = PromiseRejectEvent::ResolveAfterResolve;
+                    break;
+                default:
+                    return;
+            }
+            
+            // Get the rejection reason
+            std::string reason;
+            v8::Local<v8::Value> value = message.GetValue();
+            if (!value.IsEmpty()) {
+                v8::String::Utf8Value utf8(isolate, value);
+                if (*utf8) reason = *utf8;
+            }
+            
+            // Register the promise if available
+            ValueId promise_id = ScriptEnvironment::INVALID_VALUE_ID;
+            v8::Local<v8::Promise> promise = message.GetPromise();
+            if (!promise.IsEmpty()) {
+                v8::Local<v8::Value> promise_val = promise.As<v8::Value>();
+                promise_id = self->RegisterValue(&promise_val);
+            }
+            
+            // Call the user's callback
+            self->impl_->unhandled_rejection_callback_(event, promise_id, reason);
+        });
     }
 }
 

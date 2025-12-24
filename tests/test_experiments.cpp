@@ -3814,7 +3814,8 @@ TEST_CASE("Test 44: ScriptExtension", "[script][extension]") {
 // Test 45: Promise/Future Bridge
 //=============================================================================
 
-TEST_CASE("Test 45: Promise Bridge", "[script][promise]") {
+TEST_CASE("Test 45: Promise Bridge", "[script][promise]")
+{
     auto& engine = ScriptEngine::Instance();
     auto env = engine.GetMainEnvironment();
     REQUIRE(env);
@@ -3870,6 +3871,188 @@ TEST_CASE("Test 45: Promise Bridge", "[script][promise]") {
         auto await_result = env->AwaitPromise(promise_id, std::chrono::milliseconds(100));
         CHECK(!await_result.IsOk());
         CHECK(await_result.Error().code == ErrorCode::Timeout);
+    }
+}
+
+//=============================================================================
+// Test 46: TLA Support (Top-Level Await via ExecuteModule)
+//=============================================================================
+
+TEST_CASE("Test 46: ExecuteModule TLA", "[script][module][tla]") {
+    auto& engine = ScriptEngine::Instance();
+    auto env = engine.GetMainEnvironment();
+    REQUIRE(env);
+    
+    SECTION("46.1 Simple module with export") {
+        auto result = env->ExecuteModule(R"(
+            export const value = 42;
+        )", "test_module");
+        
+        CHECK(result.IsOk());
+        auto ns = result.Value();
+        CHECK(ns.HasValue());
+        
+        // Verify exported value
+        auto value_export = ns.Get("value");
+        CHECK(value_export.HasValue());
+        CHECK(value_export.ToNumber().value_or(0) == 42.0);
+    }
+    
+    SECTION("46.2 TLA - await with immediate Promise") {
+        auto result = env->ExecuteModule(R"(
+            const data = await Promise.resolve('immediate');
+            export const completed = data === 'immediate';
+        )", "tla_immediate_module");
+        
+        if (!result.IsOk()) {
+            WARN("46.2 Error: " << result.Error().message);
+        }
+        CHECK(result.IsOk());
+        
+        // Verify exported value
+        auto completed = result.Value().Get("completed");
+        CHECK(completed.ToBool().value_or(false) == true);
+    }
+    
+    SECTION("46.3 TLA - chained await") {
+        auto result = env->ExecuteModule(R"(
+            const a = await Promise.resolve(1);
+            const b = await Promise.resolve(2);
+            export const sum = a + b;
+        )", "tla_chain_module");
+
+        if (!result.IsOk()) {
+            WARN("46.3 Error: " << result.Error().message);
+        }
+        CHECK(result.IsOk());
+        
+        // Verify exported value
+        auto sum = result.Value().Get("sum");
+        CHECK(sum.ToNumber().value_or(0) == 3.0);
+    }
+    
+    SECTION("46.4 TLA - timeout on never-resolving promise") {
+        auto result = env->ExecuteModule(R"(
+            await new Promise(() => {}); // Never resolves
+            export const never = true;
+        )", "tla_timeout_module", std::chrono::milliseconds(100));
+        
+        CHECK(!result.IsOk());
+        CHECK(result.Error().code == ErrorCode::Timeout);
+    }
+    
+    SECTION("46.5 Native await of exported promise") {
+        // Module exports a promise, C++ awaits it natively
+        auto result = env->ExecuteModule(R"(
+            export const asyncValue = Promise.resolve(99);
+        )", "export_promise_module");
+        
+        CHECK(result.IsOk());
+        
+        // Get the exported promise
+        auto asyncValue = result.Value().Get("asyncValue");
+        CHECK(asyncValue.HasValue());
+        
+        // Await it from native code
+        auto awaited = env->AwaitPromise(asyncValue.GetValueId());
+        CHECK(awaited.IsOk());
+        CHECK(awaited.Value().ToNumber().value_or(0) == 99.0);
+    }
+}
+
+//=============================================================================
+// Test 47: Unhandled Promise Rejection Handler
+//=============================================================================
+
+TEST_CASE("Test 47: Unhandled Rejection Handler", "[script][promise][rejection]") {
+    auto& engine = ScriptEngine::Instance();
+    auto env = engine.GetMainEnvironment();
+    REQUIRE(env);
+    
+    SECTION("47.1 Unhandled rejection is captured") {
+        std::atomic<bool> called{false};
+        std::string captured_reason;
+        ScriptEnvironment::PromiseRejectEvent captured_event;
+        
+        env->SetUnhandledRejectionHandler([&](ScriptEnvironment::PromiseRejectEvent event, 
+                                               ScriptEnvironment::ValueId promise, 
+                                               const std::string& reason) {
+            called = true;
+            captured_event = event;
+            captured_reason = reason;
+        });
+        
+        // Create an unhandled rejected promise
+        auto result = env->ExecuteSync("Promise.reject('test_error')");
+        CHECK(result.IsOk());
+        
+        // Give microtask queue time to process
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        
+        CHECK(called.load());
+        CHECK(captured_event == ScriptEnvironment::PromiseRejectEvent::Unhandled);
+        CHECK(captured_reason == "test_error");
+        
+        // Clear the handler
+        env->SetUnhandledRejectionHandler(nullptr);
+    }
+    
+    SECTION("47.2 Handled rejection - handler added after initial rejection") {
+        // V8 fires kPromiseRejectWithNoHandler BEFORE the .catch() attaches,
+        // then fires kPromiseHandlerAddedAfterReject when it does.
+        // Track both events to verify the rejection was ultimately handled.
+        std::atomic<int> unhandled_count{0};
+        std::atomic<int> handled_count{0};
+        
+        env->SetUnhandledRejectionHandler([&](ScriptEnvironment::PromiseRejectEvent event, 
+                                               ScriptEnvironment::ValueId, const std::string&) {
+            if (event == ScriptEnvironment::PromiseRejectEvent::Unhandled) {
+                ++unhandled_count;
+            } else if (event == ScriptEnvironment::PromiseRejectEvent::HandlerAdded) {
+                ++handled_count;
+            }
+        });
+        
+        // Create a handled rejected promise
+        auto result = env->ExecuteSync("Promise.reject('handled').catch(e => 'caught')");
+        CHECK(result.IsOk());
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        
+        // V8 fires Unhandled first, then HandlerAdded when .catch attaches
+        // Net result: rejection was handled (cancel out)
+        CHECK(unhandled_count.load() == handled_count.load());
+        
+        env->SetUnhandledRejectionHandler(nullptr);
+    }
+    
+    SECTION("47.3 Rejection with pre-attached handler - no unhandled event") {
+        // Attach .catch() BEFORE calling reject() - no unhandled event should fire
+        std::atomic<int> unhandled_count{0};
+        
+        env->SetUnhandledRejectionHandler([&](ScriptEnvironment::PromiseRejectEvent event, 
+                                               ScriptEnvironment::ValueId, const std::string&) {
+            if (event == ScriptEnvironment::PromiseRejectEvent::Unhandled) {
+                ++unhandled_count;
+            }
+        });
+        
+        // Create promise, attach handler, THEN reject
+        auto result = env->ExecuteSync(R"(
+            let rejectFn;
+            const p = new Promise((_, reject) => { rejectFn = reject; });
+            p.catch(e => 'handled');
+            rejectFn('delayed_error');
+            'done'
+        )");
+        CHECK(result.IsOk());
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        
+        // Handler was attached before rejection - no unhandled event
+        CHECK(unhandled_count.load() == 0);
+        
+        env->SetUnhandledRejectionHandler(nullptr);
     }
 }
 

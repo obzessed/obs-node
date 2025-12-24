@@ -115,6 +115,10 @@ public:
     // Promise-aware execution (waits for Promise resolution)
     ScriptResult ExecuteSyncAwait(const std::string& code, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
     
+    // ES Module execution (true TLA support)
+    ScriptResult ExecuteModule(const std::string& code, const std::string& module_name = "inline", 
+                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    
     // Script precompilation (caching)
     CompiledScriptPtr Compile(const std::string& code, const std::string& name = "");
     CompiledScriptPtr CompileFromCache(const std::vector<uint8_t>& cached_data, 
@@ -181,6 +185,18 @@ public:
     
     // Await a JS Promise synchronously from C++ (blocks until resolved/rejected)
     ScriptResult AwaitPromise(ValueId promise_id, std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
+    
+    // Unhandled promise rejection handler
+    enum class PromiseRejectEvent {
+        Unhandled,          // Promise rejected with no handler
+        HandlerAdded,       // Handler added after rejection (no longer unhandled)
+        RejectAfterResolve, // Reject called on already-resolved promise
+        ResolveAfterResolve // Resolve called on already-resolved promise
+    };
+    using UnhandledRejectionCallback = std::function<void(PromiseRejectEvent event, 
+                                                          ValueId promise, 
+                                                          const std::string& reason)>;
+    void SetUnhandledRejectionHandler(UnhandledRejectionCallback callback);
     
     // Internal accessors for sandbox support
     node::CommonEnvironmentSetup* GetSetup() const;
