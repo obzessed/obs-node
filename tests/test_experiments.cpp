@@ -3810,6 +3810,69 @@ TEST_CASE("Test 44: ScriptExtension", "[script][extension]") {
     CHECK(result.Value().ToNumber().value_or(0) == 17.0);
 }
 
+//=============================================================================
+// Test 45: Promise/Future Bridge
+//=============================================================================
+
+TEST_CASE("Test 45: Promise Bridge", "[script][promise]") {
+    auto& engine = ScriptEngine::Instance();
+    auto env = engine.GetMainEnvironment();
+    REQUIRE(env);
+    
+    SECTION("45.1 CreatePromiseFromCallback - immediate resolve") {
+        // Create a promise that resolves immediately
+        auto promise_id = env->CreatePromiseFromCallback([env]() -> ScriptValue {
+            auto val_id = env->CreateNumber(42.0);
+            return ScriptValue(env.get(), val_id);
+        });
+        
+        REQUIRE(promise_id != ScriptEnvironment::INVALID_VALUE_ID);
+        
+        // Await the promise
+        auto result = env->AwaitPromise(promise_id);
+        CHECK(result.IsOk());
+        CHECK(result.Value().ToNumber().value_or(0) == 42.0);
+    }
+    
+    SECTION("45.2 CreatePromiseFromCallback - delayed resolve") {
+        // Create a promise that resolves after a delay
+        auto promise_id = env->CreatePromiseFromCallback([env]() -> ScriptValue {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            auto val_id = env->CreateString("delayed");
+            return ScriptValue(env.get(), val_id);
+        });
+        
+        REQUIRE(promise_id != ScriptEnvironment::INVALID_VALUE_ID);
+        
+        // Await the promise
+        auto result = env->AwaitPromise(promise_id);
+        CHECK(result.IsOk());
+        CHECK(result.Value().ToString() == "delayed");
+    }
+    
+    SECTION("45.3 AwaitPromise - JS Promise") {
+        // Create and resolve a promise in JS
+        auto result = env->ExecuteSync("new Promise(resolve => setTimeout(() => resolve('js_resolved'), 50))");
+        REQUIRE(result.IsOk());
+        
+        auto promise_id = result.Value().GetValueId();
+        auto await_result = env->AwaitPromise(promise_id);
+        CHECK(await_result.IsOk());
+        CHECK(await_result.Value().ToString() == "js_resolved");
+    }
+    
+    SECTION("45.4 AwaitPromise - timeout") {
+        // Create a promise that never resolves
+        auto result = env->ExecuteSync("new Promise(() => {})");
+        REQUIRE(result.IsOk());
+        
+        auto promise_id = result.Value().GetValueId();
+        auto await_result = env->AwaitPromise(promise_id, std::chrono::milliseconds(100));
+        CHECK(!await_result.IsOk());
+        CHECK(await_result.Error().code == ErrorCode::Timeout);
+    }
+}
+
 int main(int argc, char* argv[]) {
     auto& engine = ScriptEngine::Instance();
     // Set log level to Error to keep test output clean (suppresses warnings)

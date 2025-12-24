@@ -1930,4 +1930,206 @@ void ScriptEnvironment::RegisterExtension(std::shared_ptr<ScriptExtension> exten
     impl_->extensions_.push_back(extension);
 }
 
+//=============================================================================
+// Promise/Future Bridge
+//=============================================================================
+
+ScriptEnvironment::ValueId ScriptEnvironment::CreatePromiseFromCallback(FutureCallback callback) {
+    if (!impl_->setup_ || !callback) return INVALID_VALUE_ID;
+    
+    v8::Isolate* isolate = impl_->setup_->isolate();
+    v8::Locker locker(isolate);
+    v8::Isolate::Scope isolate_scope(isolate);
+    v8::HandleScope handle_scope(isolate);
+    v8::Local<v8::Context> context = impl_->setup_->context();
+    v8::Context::Scope context_scope(context);
+    
+    // Create a Promise resolver
+    v8::Local<v8::Promise::Resolver> resolver = v8::Promise::Resolver::New(context).ToLocalChecked();
+    v8::Local<v8::Promise> promise = resolver->GetPromise();
+    
+    // Store the resolver in a persistent handle so it survives the async call
+    auto* persistent_resolver = new v8::Global<v8::Promise::Resolver>(isolate, resolver);
+    
+    // Capture what we need for the async callback
+    ScriptEnvironment* env = this;
+    auto weak_self = weak_from_this();
+    
+    // Spawn a thread to wait on the callback (simulating future.get())
+    std::thread([weak_self, persistent_resolver, callback = std::move(callback)]() {
+        ScriptValue result;
+        bool success = true;
+        std::string error_msg;
+        
+        try {
+            result = callback();
+        } catch (const std::exception& e) {
+            success = false;
+            error_msg = e.what();
+        } catch (...) {
+            success = false;
+            error_msg = "Unknown exception";
+        }
+        
+        // Post back to the V8 thread
+        auto env_ptr = weak_self.lock();
+        if (!env_ptr) {
+            delete persistent_resolver;
+            return;
+        }
+        
+        // Use the platform's task runner to post back to the isolate thread
+        auto* setup = env_ptr->GetSetup();
+        if (!setup) {
+            delete persistent_resolver;
+            return;
+        }
+        
+        v8::Isolate* isolate = setup->isolate();
+        
+        // Create a shared state for the result
+        struct ResolveData {
+            bool success;
+            ScriptValue result;
+            std::string error_msg;
+            v8::Global<v8::Promise::Resolver>* resolver;
+            std::weak_ptr<ScriptEnvironment> env;
+        };
+        
+        auto* data = new ResolveData{success, std::move(result), std::move(error_msg), persistent_resolver, weak_self};
+        
+        // Create a proper v8::Task subclass
+        class ResolveTask : public v8::Task {
+        public:
+            explicit ResolveTask(ResolveData* d) : data_(d) {}
+            
+            void Run() override {
+                auto env_ptr = data_->env.lock();
+                if (!env_ptr) {
+                    delete data_->resolver;
+                    delete data_;
+                    return;
+                }
+                
+                auto* setup = env_ptr->GetSetup();
+                if (!setup) {
+                    delete data_->resolver;
+                    delete data_;
+                    return;
+                }
+                
+                v8::Isolate* isolate = setup->isolate();
+                // Note: Do NOT acquire Locker here - the caller (DrainTasks) already holds it
+                v8::HandleScope handle_scope(isolate);
+                v8::Local<v8::Context> context = setup->context();
+                v8::Context::Scope context_scope(context);
+                
+                v8::Local<v8::Promise::Resolver> resolver = data_->resolver->Get(isolate);
+                
+                if (data_->success) {
+                    // Resolve with the result value
+                    if (data_->result.HasValue()) {
+                        auto* entry = env_ptr->GetValueEntry(data_->result.GetValueId());
+                        if (entry && entry->global_ptr) {
+                            auto* global = static_cast<v8::Global<v8::Value>*>(entry->global_ptr);
+                            resolver->Resolve(context, global->Get(isolate)).Check();
+                        } else {
+                            resolver->Resolve(context, v8::Undefined(isolate)).Check();
+                        }
+                    } else {
+                        resolver->Resolve(context, v8::Undefined(isolate)).Check();
+                    }
+                } else {
+                    // Reject with error
+                    v8::Local<v8::String> err = v8::String::NewFromUtf8(isolate, data_->error_msg.c_str()).ToLocalChecked();
+                    resolver->Reject(context, v8::Exception::Error(err)).Check();
+                }
+                
+                delete data_->resolver;
+                delete data_;
+            }
+            
+        private:
+            ResolveData* data_;
+        };
+        
+        // Post the resolution task
+        env_ptr->impl_->platform_->GetForegroundTaskRunner(isolate)->PostTask(
+            std::make_unique<ResolveTask>(data)
+        );
+    }).detach();
+    
+    // Register the promise and return its ID
+    return RegisterValue(&promise);
+}
+
+ScriptResult ScriptEnvironment::AwaitPromise(ValueId promise_id, std::chrono::milliseconds timeout) {
+    if (!HasValue(promise_id) || !impl_->setup_) {
+        return ScriptResult::Err(ErrorCode::InvalidArgument, "Invalid promise ID");
+    }
+    
+    v8::Isolate* isolate = impl_->setup_->isolate();
+    auto start = std::chrono::steady_clock::now();
+    
+    // Poll the promise state, releasing the Locker between checks
+    // This allows the environment thread to process resolution tasks
+    while (true) {
+        v8::Promise::PromiseState state;
+        
+        {
+            v8::Locker locker(isolate);
+            v8::Isolate::Scope isolate_scope(isolate);
+            v8::HandleScope handle_scope(isolate);
+            v8::Local<v8::Context> context = impl_->setup_->context();
+            v8::Context::Scope context_scope(context);
+            
+            v8::Local<v8::Value> promise_val;
+            {
+                std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+                auto it = impl_->value_registry_.find(promise_id);
+                if (it == impl_->value_registry_.end()) {
+                    return ScriptResult::Err(ErrorCode::InvalidArgument, "Promise not found");
+                }
+                auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+                promise_val = global->Get(isolate);
+            }
+            
+            if (!promise_val->IsPromise()) {
+                return ScriptResult::Err(ErrorCode::InvalidArgument, "Value is not a promise");
+            }
+            
+            v8::Local<v8::Promise> promise = promise_val.As<v8::Promise>();
+            state = promise->State();
+            
+            if (state == v8::Promise::kFulfilled) {
+                v8::Local<v8::Value> result = promise->Result();
+                ValueId result_id = RegisterValue(&result);
+                ScriptValue result_value(this, result_id);
+                
+                std::string result_str;
+                if (!result.IsEmpty() && !result->IsUndefined()) {
+                    v8::String::Utf8Value utf8(isolate, result);
+                    if (*utf8) result_str = *utf8;
+                }
+                result_value.SetStringResult(result_str);
+                
+                return ScriptResult::Ok(std::move(result_value));
+            } else if (state == v8::Promise::kRejected) {
+                v8::Local<v8::Value> reason = promise->Result();
+                v8::String::Utf8Value utf8(isolate, reason);
+                std::string error_msg = *utf8 ? *utf8 : "Promise rejected";
+                return ScriptResult::Err(ErrorCode::RuntimeError, error_msg);
+            }
+        } // Locker released here
+        
+        // Check timeout
+        if (std::chrono::steady_clock::now() - start > timeout) {
+            return ScriptResult::Err(ErrorCode::Timeout, "Promise await timed out");
+        }
+        
+        // Sleep without holding the Locker, allowing env thread to work
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
 } // namespace experiments

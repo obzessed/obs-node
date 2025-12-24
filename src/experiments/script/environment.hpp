@@ -174,6 +174,14 @@ public:
     SandboxContextPtr CreateSandbox(const std::map<std::string, ScriptValue>& sandbox, 
                                      const std::string& name = "");
     
+    // Promise/Future Bridge
+    // Create a JS Promise from a C++ future (the future is awaited on a background thread)
+    using FutureCallback = std::function<ScriptValue()>;
+    ValueId CreatePromiseFromCallback(FutureCallback callback);
+    
+    // Await a JS Promise synchronously from C++ (blocks until resolved/rejected)
+    ScriptResult AwaitPromise(ValueId promise_id, std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
+    
     // Internal accessors for sandbox support
     node::CommonEnvironmentSetup* GetSetup() const;
     ValueEntry* GetValueEntry(ValueId id);
