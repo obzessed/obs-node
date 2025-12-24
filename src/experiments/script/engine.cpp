@@ -191,16 +191,44 @@ ScriptPtr ScriptEngine::Execute(const std::string& code, const Script::Options& 
     return script;
 }
 
-Result<std::string> ScriptEngine::ExecuteSync(const std::string& code, std::chrono::milliseconds timeout) {
+ScriptResult ScriptEngine::ExecuteSync(const std::string& code, std::chrono::milliseconds timeout) {
     auto mainEnv = GetMainEnvironment();
-    if (!mainEnv) return ScriptError::Make(ErrorCode::NotInitialized, "Engine not initialized");
+    if (!mainEnv) return ScriptResult::Err(ErrorCode::NotInitialized, "Engine not initialized");
     return mainEnv->ExecuteSync(code, timeout);
 }
 
-Result<std::string> ScriptEngine::ExecuteFile(const std::filesystem::path& path, std::chrono::milliseconds timeout) {
+ScriptResult ScriptEngine::ExecuteFile(const std::filesystem::path& path, std::chrono::milliseconds timeout) {
     auto mainEnv = GetMainEnvironment();
-    if (!mainEnv) return ScriptError::Make(ErrorCode::NotInitialized, "Engine not initialized");
+    if (!mainEnv) return ScriptResult::Err(ErrorCode::NotInitialized, "Engine not initialized");
     return mainEnv->ExecuteFile(path, timeout);
+}
+
+std::optional<double> ScriptEngine::ExecuteSyncNumber(const std::string& code, std::chrono::milliseconds timeout) {
+    auto mainEnv = GetMainEnvironment();
+    if (!mainEnv) return std::nullopt;
+    return mainEnv->ExecuteSyncNumber(code, timeout);
+}
+
+std::optional<std::string> ScriptEngine::ExecuteSyncString(const std::string& code, std::chrono::milliseconds timeout) {
+    auto mainEnv = GetMainEnvironment();
+    if (!mainEnv) return std::nullopt;
+    return mainEnv->ExecuteSyncString(code, timeout);
+}
+
+std::optional<bool> ScriptEngine::ExecuteSyncBool(const std::string& code, std::chrono::milliseconds timeout) {
+    auto mainEnv = GetMainEnvironment();
+    if (!mainEnv) return std::nullopt;
+    return mainEnv->ExecuteSyncBool(code, timeout);
+}
+
+std::future<ScriptResult> ScriptEngine::ExecuteAsync(const std::string& code, std::chrono::milliseconds timeout) {
+    auto mainEnv = GetMainEnvironment();
+    if (!mainEnv) {
+        std::promise<ScriptResult> promise;
+        promise.set_value(ScriptResult::Err(ErrorCode::NotInitialized, "Engine not initialized"));
+        return promise.get_future();
+    }
+    return mainEnv->ExecuteAsync(code, timeout);
 }
 
 } // namespace experiments

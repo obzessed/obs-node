@@ -1,197 +1,153 @@
 #pragma once
 
 /**
- * script_result.hpp - Safe V8 Value Wrapper
+ * script_result.hpp - Result type for script execution
  * 
- * Wraps v8::Global<v8::Value> with safety mechanisms ensuring proper
- * V8 scoping (Locker, HandleScope, Context) when accessing the value.
+ * Wraps either a ScriptValue (success) or ScriptError (failure).
+ * Provides a simple API for external code.
  */
 
-#include <string>
-#include <optional>
-#include <functional>
-#include <type_traits>
-#include <stdexcept>
-#include <vector>
-
-// Forward declarations - actual V8 headers needed in implementation
-namespace v8 {
-    class Isolate;
-    class Context;
-    class Value;
-    template<class T> class Local;
-    template<class T> class Global;
-}
+#include "script_value.hpp"
+#include "../core/error.hpp"
+#include <variant>
 
 namespace experiments {
 
 /**
- * ScriptResult - Safe wrapper for V8 values
- * 
- * Stores a v8::Global<v8::Value> that persists beyond HandleScope.
- * Provides safe access methods that ensure proper V8 scoping.
- * 
- * Thread Safety:
- * - The object itself can be moved between threads
- * - Access to the value (WithValue, ToString, etc.) acquires v8::Locker
- * - Only one thread can access the isolate at a time
- * 
- * Lifetime:
- * - Must not outlive the ScriptEnvironment that created it
- * - The isolate pointer becomes invalid after environment destruction
+ * ScriptResult - Either a value or an error
  */
 class ScriptResult {
 public:
+    // Constructors
     ScriptResult() = default;
-    ~ScriptResult();
+    ScriptResult(ScriptValue value) : data_(std::move(value)) {}
+    ScriptResult(ScriptError error) : data_(std::move(error)) {}
     
-    // Move-only semantics (Global handles shouldn't be copied)
-    ScriptResult(ScriptResult&& other) noexcept;
-    ScriptResult& operator=(ScriptResult&& other) noexcept;
-    ScriptResult(const ScriptResult&) = delete;
-    ScriptResult& operator=(const ScriptResult&) = delete;
+    // Status checks
+    bool IsOk() const { return std::holds_alternative<ScriptValue>(data_); }
+    bool IsError() const { return std::holds_alternative<ScriptError>(data_); }
+    explicit operator bool() const { return IsOk(); }
     
-    // Factory - called from RunScript with active V8 context
-    static ScriptResult Create(v8::Isolate* isolate, v8::Local<v8::Value> value);
+    // Access value (throws if error)
+    ScriptValue& Value() {
+        if (!IsOk()) throw std::runtime_error("ScriptResult contains error, not value");
+        return std::get<ScriptValue>(data_);
+    }
+    const ScriptValue& Value() const {
+        if (!IsOk()) throw std::runtime_error("ScriptResult contains error, not value");
+        return std::get<ScriptValue>(data_);
+    }
     
-    // State checks
-    bool HasValue() const { return isolate_ != nullptr && has_value_; }
-    bool IsEmpty() const { return !HasValue(); }
-    v8::Isolate* GetIsolate() const { return isolate_; }
+    // Access error (throws if ok)
+    ScriptError& Error() {
+        if (!IsError()) throw std::runtime_error("ScriptResult contains value, not error");
+        return std::get<ScriptError>(data_);
+    }
+    const ScriptError& Error() const {
+        if (!IsError()) throw std::runtime_error("ScriptResult contains value, not error");
+        return std::get<ScriptError>(data_);
+    }
     
-    /**
-     * Access the raw V8 value with proper scoping.
-     * 
-     * Usage:
-     *   result.WithValue([](v8::Local<v8::Value> val) {
-     *       // Use val here - scopes are active
-     *       return val->IsNumber();
-     *   });
-     * 
-     * Warning: This acquires v8::Locker which blocks the env thread.
-     */
+    // Safe access (returns nullptr if wrong type)
+    ScriptValue* TryValue() { return IsOk() ? &std::get<ScriptValue>(data_) : nullptr; }
+    const ScriptValue* TryValue() const { return IsOk() ? &std::get<ScriptValue>(data_) : nullptr; }
+    ScriptError* TryError() { return IsError() ? &std::get<ScriptError>(data_) : nullptr; }
+    const ScriptError* TryError() const { return IsError() ? &std::get<ScriptError>(data_) : nullptr; }
+    
+    // Convenience: extract primitives directly
+    std::string ToString() const { return IsOk() ? Value().ToString() : Error().message; }
+    std::optional<double> ToNumber() const { return IsOk() ? Value().ToNumber() : std::nullopt; }
+    std::optional<bool> ToBool() const { return IsOk() ? Value().ToBool() : std::nullopt; }
+    
+    // Static constructors
+    static ScriptResult Ok(ScriptValue value) { return ScriptResult(std::move(value)); }
+    static ScriptResult Err(ScriptError error) { return ScriptResult(std::move(error)); }
+    static ScriptResult Err(ErrorCode code, const std::string& msg) {
+        return ScriptResult(ScriptError::Make(code, msg));
+    }
+    
+    //=========================================================================
+    // Monadic Operations (Functional Composition)
+    //=========================================================================
+    
+    // Transform: Apply function to value if Ok, propagate error otherwise
+    // Usage: result.Transform([](ScriptValue& v) { return v.ToString(); })
     template<typename F>
-    auto WithValue(F&& func) -> std::invoke_result_t<F, v8::Local<v8::Value>>;
+    auto Transform(F&& fn) const -> ScriptResult {
+        if (IsOk()) {
+            return ScriptResult::Ok(fn(Value()));
+        }
+        return ScriptResult::Err(Error());
+    }
     
-    /**
-     * Access with context (for operations that need it)
-     */
+    // AndThen: Chain operations that return ScriptResult (flatMap/bind)
+    // Usage: result.AndThen([&](ScriptValue& v) { return env.ExecuteSync(v.ToString()); })
     template<typename F>
-    auto WithValueAndContext(F&& func) -> std::invoke_result_t<F, v8::Local<v8::Value>, v8::Local<v8::Context>>;
+    auto AndThen(F&& fn) const -> ScriptResult {
+        if (IsOk()) {
+            return fn(Value());
+        }
+        return ScriptResult::Err(Error());
+    }
     
-    // Convenience extractors (thread-safe, copy out primitives)
-    std::string ToString() const;
-    std::optional<double> ToNumber() const;
-    std::optional<bool> ToBool() const;
-    std::optional<int64_t> ToInt64() const;
+    // OrElse: Provide alternative on error
+    // Usage: result.OrElse([](const ScriptError& e) { return ScriptResult::Ok(defaultVal); })
+    template<typename F>
+    auto OrElse(F&& fn) const -> ScriptResult {
+        if (IsOk()) {
+            return *this;
+        }
+        return fn(Error());
+    }
     
-    // Type checks
-    bool IsString() const;
-    bool IsNumber() const;
-    bool IsBoolean() const;
-    bool IsObject() const;
-    bool IsArray() const;
-    bool IsFunction() const;
-    bool IsNull() const;
-    bool IsUndefined() const;
-    bool IsNullOrUndefined() const;
+    // ValueOr: Get value or default if error
+    // Usage: auto val = result.ValueOr(defaultValue);
+    ScriptValue ValueOr(ScriptValue default_value) const {
+        return IsOk() ? Value() : std::move(default_value);
+    }
     
-    //=========================================================================
-    // Function Calling
-    //=========================================================================
+    // ValueOrElse: Get value or compute default lazily
+    // Usage: auto val = result.ValueOrElse([]() { return createDefault(); });
+    template<typename F>
+    ScriptValue ValueOrElse(F&& fn) const {
+        return IsOk() ? Value() : fn();
+    }
     
-    /**
-     * Call this value as a function with no arguments.
-     * Returns a new ScriptResult containing the return value.
-     * Throws if this is not a function.
-     */
-    ScriptResult Call();
+    // Match: Pattern match on result (visitor pattern)
+    // Usage: result.Match(
+    //     [](const ScriptValue& v) { return handleValue(v); },
+    //     [](const ScriptError& e) { return handleError(e); }
+    // );
+    template<typename OkFn, typename ErrFn>
+    auto Match(OkFn&& ok_fn, ErrFn&& err_fn) const 
+        -> decltype(ok_fn(std::declval<const ScriptValue&>())) {
+        if (IsOk()) {
+            return ok_fn(Value());
+        }
+        return err_fn(Error());
+    }
     
-    /**
-     * Call this value as a function with arguments specified as ScriptResults.
-     * @param args Vector of ScriptResult arguments
-     * @return ScriptResult containing the return value
-     */
-    ScriptResult Call(const std::vector<ScriptResult*>& args);
+    // Inspect: Side-effect on value without consuming (for debugging/logging)
+    // Usage: result.Inspect([](const ScriptValue& v) { LOG_DEBUG(v.ToString()); })
+    template<typename F>
+    const ScriptResult& Inspect(F&& fn) const {
+        if (IsOk()) {
+            fn(Value());
+        }
+        return *this;
+    }
     
-    /**
-     * Call a method on this object.
-     * @param method_name Name of the method to call
-     * @param args Vector of ScriptResult arguments
-     * @return ScriptResult containing the return value
-     */
-    ScriptResult CallMethod(const std::string& method_name, const std::vector<ScriptResult*>& args = {});
-    
-    //=========================================================================
-    // Object Property Access
-    //=========================================================================
-    
-    /**
-     * Get a property from this object.
-     * @param key Property name
-     * @return ScriptResult containing the property value (may be undefined)
-     */
-    ScriptResult Get(const std::string& key);
-    
-    /**
-     * Get an element from this array by index.
-     * @param index Array index
-     * @return ScriptResult containing the element (may be undefined)
-     */
-    ScriptResult Get(uint32_t index);
-    
-    /**
-     * Set a property on this object.
-     * @param key Property name
-     * @param value Value to set
-     * @return true if successful
-     */
-    bool Set(const std::string& key, ScriptResult& value);
-    
-    /**
-     * Get the length of an array or string.
-     * @return Length, or nullopt if not applicable
-     */
-    std::optional<uint32_t> Length() const;
-    
-    //=========================================================================
-    // Static Value Creators (requires active V8 context)
-    //=========================================================================
-    
-    /**
-     * Create a ScriptResult from a primitive value.
-     * Note: Must be called from within WithValueAndContext or environment thread.
-     */
-    static ScriptResult FromNumber(v8::Isolate* isolate, double value);
-    static ScriptResult FromString(v8::Isolate* isolate, const std::string& value);
-    static ScriptResult FromBool(v8::Isolate* isolate, bool value);
-    static ScriptResult Undefined(v8::Isolate* isolate);
-    static ScriptResult Null(v8::Isolate* isolate);
-    
-    // Also store string representation for backward compatibility
-    void SetStringResult(std::string str) { string_result_ = std::move(str); }
-    const std::string& GetStringResult() const { return string_result_; }
+    // InspectError: Side-effect on error without consuming
+    template<typename F>
+    const ScriptResult& InspectError(F&& fn) const {
+        if (IsError()) {
+            fn(Error());
+        }
+        return *this;
+    }
 
 private:
-    // Private constructor - use Create() factory
-    ScriptResult(v8::Isolate* isolate);
-    
-    // Set value (called by Create, needs V8 context active)
-    void SetValue(v8::Local<v8::Value> value);
-    
-    // Reset/clear
-    void Reset();
-    
-    v8::Isolate* isolate_ = nullptr;
-    bool has_value_ = false;
-    
-    // v8::Global storage - actual V8 header needed
-    // We use a pointer to avoid requiring V8 headers in this header
-    struct Impl;
-    Impl* impl_ = nullptr;
-    
-    // Backward compat string result
-    std::string string_result_;
+    std::variant<std::monostate, ScriptValue, ScriptError> data_;
 };
 
 } // namespace experiments

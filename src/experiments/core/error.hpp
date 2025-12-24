@@ -26,7 +26,9 @@ enum class ErrorCode {
     FileNotFound,
     FileReadError,
     InvalidArgument,
-    InternalError
+    InternalError,
+    ModuleNotFound,
+    ExecutionError
 };
 
 struct ScriptError {

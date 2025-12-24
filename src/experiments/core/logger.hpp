@@ -351,6 +351,23 @@ private:
 };
 
 //=============================================================================
+// V8 Value Debug Printer (requires V8 headers when used)
+//=============================================================================
+
+// Forward declaration - implementation in cpp file that has V8 access
+std::string V8ValueToDebugString(void* isolate_ptr, void* value_ptr);
+
+// Helper macro for logging V8 values (use in code with V8 access)
+// Usage: LOG_V8(LogLevel::Debug, "script", isolate, local_value)
+#define LOG_V8_VALUE(level, category, isolate, v8_value) \
+    do { \
+        std::string _v8_str = V8ValueToDebugString(static_cast<void*>(isolate), static_cast<void*>(&(v8_value))); \
+        Logger::Instance().Log(level, category, _v8_str); \
+    } while(0)
+
+#define LOG_V8_DEBUG(cat, isolate, v8_value) LOG_V8_VALUE(LogLevel::Debug, cat, isolate, v8_value)
+
+//=============================================================================
 // Convenience Macros
 //=============================================================================
 

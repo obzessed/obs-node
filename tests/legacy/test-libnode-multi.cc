@@ -68,13 +68,13 @@ int main()
 	auto result = engine.ExecuteSync("40 + 2;");
 	auto duration = ms_since(start);
 
-	bool passed = result.IsOk() && result.Value() == "42";
+	bool passed = result.IsOk() && result.ToString() == "42";
 	std::cout << "  Duration: " << duration << "ms" << std::endl;
 	std::cout << (passed ? "[PASS]" : "[FAIL]")
-		  << " Result: " << (result.IsOk() ? result.Value() : result.Error().message) << std::endl;
+		  << " Result: " << (result.IsOk() ? result.ToString() : result.Error().message) << std::endl;
 	results.push_back(
 		{"Basic Execution", passed,
-		 (result.IsOk() ? result.Value() : result.Error().message) + " (" + std::to_string(duration) + "ms)"});
+		 (result.IsOk() ? result.ToString() : result.Error().message) + " (" + std::to_string(duration) + "ms)"});
     }
 
     // Test 2: Script timeout with detailed timing
@@ -222,9 +222,9 @@ int main()
 	}
 	std::cout << std::endl;
 	std::cout << "  Results:" << std::endl;
-	std::cout << "    Emergency: " << emergency->GetResult() << std::endl;
-	std::cout << "    UserAction: " << userAction->GetResult() << std::endl;
-	std::cout << "    DataProcess: " << dataProcess->GetResult() << std::endl;
+	std::cout << "    Emergency: " << emergency->GetResultString() << std::endl;
+	std::cout << "    UserAction: " << userAction->GetResultString() << std::endl;
+	std::cout << "    DataProcess: " << dataProcess->GetResultString() << std::endl;
 
 	bool passed = all_completed && priority_ok;
 	std::cout << (passed ? "[PASS]" : "[FAIL]") << " Priority execution (all=" << (all_completed ? "ok" : "fail")
@@ -425,7 +425,7 @@ int main()
 	    if (env) {
 		auto r1 = env->ExecuteSync("API_VERSION;", std::chrono::seconds(2));
 		auto r2 = env->ExecuteSync("DEBUG;", std::chrono::seconds(2));
-		passed = r1.IsOk() && r1.Value() == "2.0" && r2.IsOk() && r2.Value() == "true";
+		passed = r1.IsOk() && r1.ToString() == "2.0" && r2.IsOk() && r2.ToString() == "true";
 	    }
 	    std::cout << "       " << (passed ? "[PASS]" : "[FAIL]") << std::endl;
 	    if (passed)
@@ -449,7 +449,7 @@ int main()
 		auto r1 = env1->ExecuteSync("envId;", std::chrono::seconds(2));
 		auto r2 = env2->ExecuteSync("envId;", std::chrono::seconds(2));
 		// Each env should have its own value
-		passed = r1.IsOk() && r1.Value() == "env1" && r2.IsOk() && r2.Value() == "env2";
+		passed = r1.IsOk() && r1.ToString() == "env1" && r2.IsOk() && r2.ToString() == "env2";
 	    }
 	    std::cout << "       " << (passed ? "[PASS]" : "[FAIL]") << std::endl;
 	    if (passed)
@@ -471,7 +471,7 @@ int main()
 		env->ExecuteSync("counter++;", std::chrono::seconds(1));
 		env->ExecuteSync("counter++;", std::chrono::seconds(1));
 		auto result = env->ExecuteSync("counter;", std::chrono::seconds(1));
-		passed = result.IsOk() && result.Value() == "3";
+		passed = result.IsOk() && result.ToString() == "3";
 	    }
 	    std::cout << "       " << (passed ? "[PASS]" : "[FAIL]") << std::endl;
 	    if (passed)

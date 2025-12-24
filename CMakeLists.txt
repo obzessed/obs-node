@@ -189,10 +189,10 @@ if(BUILD_TESTS OR BUILD_BENCHMARKS)
 endif()
 
 # Old standalone libnode test (if exists)
-if(BUILD_LEGACY_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test-libnode.cpp")
+if(BUILD_LEGACY_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/legacy/test-libnode.cpp")
   set(LIBNODE_SIMPLE_TEST "test-libnode-simple")
 
-  add_executable(${LIBNODE_SIMPLE_TEST} tests/test-libnode.cpp)
+  add_executable(${LIBNODE_SIMPLE_TEST} ${CMAKE_CURRENT_SOURCE_DIR}/tests/legacy/test-libnode.cpp)
   target_include_directories(${LIBNODE_SIMPLE_TEST} PRIVATE src)
 
   set_target_properties(${LIBNODE_SIMPLE_TEST} PROPERTIES
@@ -222,10 +222,10 @@ if(BUILD_LEGACY_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test-libnode
 endif()
 
 # Legacy multi test (if exists)
-if(BUILD_LEGACY_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test-libnode-multi.cc")
+if(BUILD_LEGACY_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/legacy/test-libnode-multi.cc")
   set(LIBNODE_MULTI_TEST "test-libnode-multi")
 
-  add_executable(${LIBNODE_MULTI_TEST} tests/test-libnode-multi.cc)
+  add_executable(${LIBNODE_MULTI_TEST} ${CMAKE_CURRENT_SOURCE_DIR}/tests/legacy/test-libnode-multi.cc)
   target_sources(${LIBNODE_MULTI_TEST} PRIVATE ${EXPERIMENT_SOURCES})
   target_include_directories(${LIBNODE_MULTI_TEST} PRIVATE src)
 
@@ -275,6 +275,10 @@ if(BUILD_TESTS)
     Catch2::Catch2 # Testing Library
 #    Catch2::Catch2WithMain # Testing Library
   )
+  target_link_libraries(${LIBNODE_TEST_TARGET} PRIVATE
+    #  fmt::fmt
+    nlohmann_json::nlohmann_json
+  )
 
   # Copy libnode DLL and PDB for test executable
   if(WIN32 AND LibNode_DLL)
@@ -294,7 +298,7 @@ if(BUILD_TESTS)
     endif()
   endif()
 
-  catch_discover_tests(${LIBNODE_TEST_TARGET})
+#  catch_discover_tests(${LIBNODE_TEST_TARGET})
 endif()
 
 # ============================================================================
@@ -316,6 +320,10 @@ if(BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fuzzing.cpp")
     LibNode::LibNode
     Catch2::Catch2 # Testing Library
     # Catch2::Catch2WithMain # Testing Library
+  )
+  target_link_libraries(${LIBNODE_FUZZING_TARGET} PRIVATE
+    #  fmt::fmt
+    nlohmann_json::nlohmann_json
   )
   
   # Copy libnode DLL
@@ -350,6 +358,10 @@ if(BUILD_BENCHMARKS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/benchmarks.cpp
     LibNode::LibNode
     Catch2::Catch2 # Testing Library
     # Catch2::Catch2WithMain # Testing Library
+  )
+  target_link_libraries(${LIBNODE_BENCHMARK_TARGET} PRIVATE
+    #  fmt::fmt
+    nlohmann_json::nlohmann_json
   )
   
   # Copy libnode DLL

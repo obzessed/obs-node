@@ -6,17 +6,100 @@
  */
 
 #include "environment.hpp"
+#include "sandbox_context.hpp"
 #include "../core/logger.hpp"
 
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
 #include <node/node.h>
 #include <node/uv.h>
 #include <node/v8.h>
 
 namespace experiments {
 
+//=============================================================================
+// V8 Value Debug Printer Implementation
+//=============================================================================
 
+std::string V8ValueToDebugString(void* isolate_ptr, void* value_ptr) {
+    if (!isolate_ptr || !value_ptr) {
+        return "<null>";
+    }
+    
+    v8::Isolate* isolate = static_cast<v8::Isolate*>(isolate_ptr);
+    v8::Local<v8::Value>* value = static_cast<v8::Local<v8::Value>*>(value_ptr);
+    
+    if (value->IsEmpty()) {
+        return "<empty>";
+    }
+    
+    v8::HandleScope handle_scope(isolate);
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    
+    std::ostringstream ss;
+    
+    // Get type using V8's TypeOf
+    v8::Local<v8::String> type_str = (*value)->TypeOf(isolate);
+    v8::String::Utf8Value type_utf8(isolate, type_str);
+    ss << "[" << (*type_utf8 ? *type_utf8 : "unknown") << "] ";
+    
+    // Get value string representation
+    v8::Local<v8::String> str;
+    if ((*value)->IsObject() && !(*value)->IsFunction()) {
+        // For objects, use JSON.stringify for better output
+        v8::MaybeLocal<v8::String> json = v8::JSON::Stringify(context, *value);
+        if (json.ToLocal(&str)) {
+            v8::String::Utf8Value utf8(isolate, str);
+            ss << (*utf8 ? *utf8 : "<stringify failed>");
+        } else {
+            ss << "[object]";
+        }
+    } else if ((*value)->ToString(context).ToLocal(&str)) {
+        v8::String::Utf8Value utf8(isolate, str);
+        ss << (*utf8 ? *utf8 : "<toString failed>");
+    } else {
+        ss << "<no string representation>";
+    }
+    
+    return ss.str();
+}
+
+namespace {
+
+// Helper class to manage V8 scopes and context entry
+class V8Scope {
+public:
+    explicit V8Scope(ScriptEnvironment* env) {
+        if (!env) return;
+        auto* setup = env->GetSetup();
+        if (!setup) return;
+        
+        isolate_ = setup->isolate();
+        locker_.emplace(isolate_);
+        isolate_scope_.emplace(isolate_);
+        handle_scope_.emplace(isolate_);
+        context_ = setup->context();
+        context_scope_.emplace(context_);
+        valid_ = true;
+    }
+
+    bool IsValid() const { return valid_; }
+    explicit operator bool() const { return valid_; }
+    v8::Isolate* GetIsolate() const { return isolate_; }
+    v8::Local<v8::Context> GetContext() const { return context_; }
+
+private:
+    bool valid_ = false;
+    v8::Isolate* isolate_ = nullptr;
+    std::optional<v8::Locker> locker_;
+    std::optional<v8::Isolate::Scope> isolate_scope_;
+    std::optional<v8::HandleScope> handle_scope_;
+    v8::Local<v8::Context> context_;
+    std::optional<v8::Context::Scope> context_scope_;
+};
+
+} // namespace
 
 //=============================================================================
 // ScriptEnvironment Implementation
@@ -155,13 +238,13 @@ bool ScriptEnvironment::Execute(const ScriptPtr& script) {
     return true;
 }
 
-Result<std::string> ScriptEnvironment::ExecuteSync(const std::string& code, std::chrono::milliseconds timeout) {
+ScriptResult ScriptEnvironment::ExecuteSync(const std::string& code, std::chrono::milliseconds timeout) {
     // For sync execution, pass timeout of 0 to script (will use env default)
     // and we handle the wait timeout ourselves
     auto script = std::make_shared<Script>(code, Script::Options{});
     
     if (!Execute(script)) {
-        return ScriptError::Make(ErrorCode::NotInitialized, "Environment not running");
+        return ScriptResult::Err(ErrorCode::NotInitialized, "Environment not running");
     }
     
     // Warn if no timeout specified - this can block indefinitely
@@ -186,33 +269,549 @@ Result<std::string> ScriptEnvironment::ExecuteSync(const std::string& code, std:
     }
     
     if (!script->Wait(wait_timeout)) {
-        return ScriptError::Make(ErrorCode::Timeout, "Wait timed out");
+        return ScriptResult::Err(ErrorCode::Timeout, "Wait timed out");
     }
     
     if (script->GetState() == ScriptState::Completed) {
-        return script->GetResult();
+        // Return the ScriptValue from the completed script
+        return ScriptResult::Ok(std::move(script->GetResultValue()));
     }
-    return script->GetError();
+    return ScriptResult::Err(script->GetError());
 }
 
-Result<std::string> ScriptEnvironment::ExecuteFile(const std::filesystem::path& path, std::chrono::milliseconds timeout) {
+ScriptResult ScriptEnvironment::ExecuteFile(const std::filesystem::path& path, std::chrono::milliseconds timeout) {
     if (!config_.allow_file_access) {
-        return ScriptError::Make(ErrorCode::InvalidArgument, "File access not allowed");
+        return ScriptResult::Err(ErrorCode::InvalidArgument, "File access not allowed");
     }
     
     if (!std::filesystem::exists(path)) {
-        return ScriptError::Make(ErrorCode::FileNotFound, "File not found: " + path.string());
+        return ScriptResult::Err(ErrorCode::FileNotFound, "File not found: " + path.string());
     }
     
     std::ifstream file(path);
     if (!file.is_open()) {
-        return ScriptError::Make(ErrorCode::FileReadError, "Cannot open file: " + path.string());
+        return ScriptResult::Err(ErrorCode::FileReadError, "Cannot open file: " + path.string());
     }
     
     std::stringstream buffer;
     buffer << file.rdbuf();
     
     return ExecuteSync(buffer.str(), timeout);
+}
+
+std::optional<double> ScriptEnvironment::ExecuteSyncNumber(const std::string& code, std::chrono::milliseconds timeout) {
+    auto result = ExecuteSync(code, timeout);
+    return result.ToNumber();
+}
+
+std::optional<std::string> ScriptEnvironment::ExecuteSyncString(const std::string& code, std::chrono::milliseconds timeout) {
+    auto result = ExecuteSync(code, timeout);
+    if (result.IsOk()) {
+        return result.ToString();
+    }
+    return std::nullopt;
+}
+
+std::optional<bool> ScriptEnvironment::ExecuteSyncBool(const std::string& code, std::chrono::milliseconds timeout) {
+    auto result = ExecuteSync(code, timeout);
+    return result.ToBool();
+}
+
+std::future<ScriptResult> ScriptEnvironment::ExecuteAsync(const std::string& code, std::chrono::milliseconds timeout) {
+    return std::async(std::launch::async, [this, code, timeout]() {
+        return ExecuteSync(code, timeout);
+    });
+}
+
+ScriptResult ScriptEnvironment::ExecuteSyncAwait(const std::string& code, std::chrono::milliseconds timeout) {
+    // Wrap the code in an async IIFE and await it
+    std::string wrapped = "(async () => { return (" + code + "); })()";
+    
+    auto result = ExecuteSync(wrapped, timeout);
+    if (!result.IsOk()) {
+        return result;
+    }
+    
+    // Check if result is a Promise and wait for it
+    auto& value = result.Value();
+    if (!value.HasValue()) {
+        return result;
+    }
+    
+    // Check if it's a Promise by checking for 'then' method
+    auto thenMethod = value.Get("then");
+    if (!thenMethod.HasValue() || !thenMethod.IsFunction()) {
+        // Not a Promise, return as-is
+        return result;
+    }
+    
+    // It's a Promise-like object - we need to resolve it
+    // Use V8's microtask queue to resolve promises
+    if (!setup_) {
+        return ScriptResult::Err(ErrorCode::InternalError, "Environment not initialized");
+    }
+    
+    v8::Isolate* isolate = setup_->isolate();
+    v8::Locker locker(isolate);
+    v8::Isolate::Scope isolate_scope(isolate);
+    v8::HandleScope handle_scope(isolate);
+    v8::Local<v8::Context> context = setup_->context();
+    v8::Context::Scope context_scope(context);
+    
+    // Get the promise value
+    v8::Local<v8::Value> promise_val;
+    {
+        std::lock_guard<std::mutex> lock(value_mutex_);
+        auto it = value_registry_.find(value.GetValueId());
+        if (it == value_registry_.end()) {
+            return ScriptResult::Err(ErrorCode::InternalError, "Promise value not found");
+        }
+        
+        auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+        promise_val = global->Get(isolate);
+    }
+    
+    if (!promise_val->IsPromise()) {
+        return result;  // Not actually a Promise
+    }
+    
+    v8::Local<v8::Promise> promise = promise_val.As<v8::Promise>();
+    
+    // Pump the microtask queue until promise settles
+    auto start = std::chrono::steady_clock::now();
+    while (promise->State() == v8::Promise::kPending) {
+        isolate->PerformMicrotaskCheckpoint();
+        
+        auto elapsed = std::chrono::steady_clock::now() - start;
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed) >= timeout) {
+            return ScriptResult::Err(ErrorCode::Timeout, "Promise resolution timed out");
+        }
+        
+        // Small sleep to prevent busy-waiting
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    
+    if (promise->State() == v8::Promise::kRejected) {
+        v8::Local<v8::Value> rejection = promise->Result();
+        v8::String::Utf8Value utf8(isolate, rejection);
+        std::string msg = *utf8 ? *utf8 : "Promise rejected";
+        return ScriptResult::Err(ErrorCode::ExecutionError, msg);
+    }
+    
+    // Promise fulfilled - return the resolved value
+    v8::Local<v8::Value> resolved = promise->Result();
+    ValueId resolved_id = RegisterValue(&resolved);
+    
+    std::string result_str;
+    {
+        v8::Local<v8::String> str;
+        if (resolved->ToString(context).ToLocal(&str)) {
+            v8::String::Utf8Value utf8(isolate, str);
+            if (*utf8) result_str = *utf8;
+        }
+    }
+    
+    ScriptValue resolved_value(this, resolved_id);
+    resolved_value.SetStringResult(result_str);
+    
+    return ScriptResult::Ok(std::move(resolved_value));
+}
+
+CompiledScriptPtr ScriptEnvironment::Compile(const std::string& code, const std::string& name) {
+    if (!setup_ || !initialized_.load()) {
+        return nullptr;
+    }
+    
+    v8::Isolate* isolate = setup_->isolate();
+    v8::Locker locker(isolate);
+    v8::Isolate::Scope isolate_scope(isolate);
+    v8::HandleScope handle_scope(isolate);
+    v8::Local<v8::Context> context = setup_->context();
+    v8::Context::Scope context_scope(context);
+    
+    v8::TryCatch try_catch(isolate);
+    
+    v8::Local<v8::String> source;
+    if (!v8::String::NewFromUtf8(isolate, code.c_str()).ToLocal(&source)) {
+        return nullptr;
+    }
+    
+    v8::Local<v8::Script> compiled;
+    if (!v8::Script::Compile(context, source).ToLocal(&compiled)) {
+        return nullptr;
+    }
+    
+    // Store the compiled script in a Global
+    auto* script_global = new v8::Global<v8::Script>(isolate, compiled);
+    
+    std::string script_name = name.empty() ? ("compiled_" + std::to_string(reinterpret_cast<uintptr_t>(script_global))) : name;
+    auto result = std::make_shared<CompiledScript>(this, script_name);
+    result->SetScriptPtr(script_global);
+    result->SetSource(code);  // Store source for cache validation
+    
+    return result;
+}
+
+ScriptResult ScriptEnvironment::RunCompiledScript(CompiledScriptPtr script, std::chrono::milliseconds timeout) {
+    if (!script || !script->IsValid() || !setup_ || !initialized_.load()) {
+        return ScriptResult::Err(ErrorCode::InvalidArgument, "Invalid compiled script");
+    }
+    
+    v8::Isolate* isolate = setup_->isolate();
+    v8::Locker locker(isolate);
+    v8::Isolate::Scope isolate_scope(isolate);
+    v8::HandleScope handle_scope(isolate);
+    v8::Local<v8::Context> context = setup_->context();
+    v8::Context::Scope context_scope(context);
+    
+    v8::TryCatch try_catch(isolate);
+    
+    auto* script_global = static_cast<v8::Global<v8::Script>*>(script->GetScriptPtr());
+    v8::Local<v8::Script> compiled = script_global->Get(isolate);
+    
+    v8::Local<v8::Value> result_val;
+    if (!compiled->Run(context).ToLocal(&result_val)) {
+        ScriptError error{ErrorCode::ExecutionError, "Execution error"};
+        if (try_catch.HasCaught()) {
+            v8::Local<v8::Message> msg = try_catch.Message();
+            if (!msg.IsEmpty()) {
+                v8::String::Utf8Value msg_str(isolate, msg->Get());
+                error.message = *msg_str ? *msg_str : "Unknown error";
+            }
+        }
+        return ScriptResult::Err(error.code, error.message);
+    }
+    
+    // Convert result to ScriptValue
+    std::string result_str;
+    {
+        v8::Local<v8::String> str;
+        if (result_val->ToString(context).ToLocal(&str)) {
+            v8::String::Utf8Value utf8(isolate, str);
+            if (*utf8) result_str = *utf8;
+        }
+    }
+    
+    ValueId result_id = RegisterValue(&result_val);
+    ScriptValue result_value(this, result_id);
+    result_value.SetStringResult(result_str);
+    
+    return ScriptResult::Ok(std::move(result_value));
+}
+
+CompiledScriptPtr ScriptEnvironment::CompileFromCache(const std::vector<uint8_t>& cached_data, 
+                                                       const std::string& source, 
+                                                       const std::string& name) {
+    return CompiledScript::FromCachedData(this, cached_data, source, name);
+}
+
+ScriptResult ScriptEnvironment::CompileFunction(const std::string& code, 
+                                                 const std::vector<std::string>& param_names,
+                                                 const std::vector<ScriptValue>& args) {
+    if (!setup_ || !initialized_.load()) {
+        return ScriptResult::Err(ErrorCode::NotInitialized, "Environment not initialized");
+    }
+    
+    if (param_names.size() != args.size()) {
+        return ScriptResult::Err(ErrorCode::InvalidArgument, "Parameter count mismatch");
+    }
+    
+    v8::Isolate* isolate = setup_->isolate();
+    v8::Locker locker(isolate);
+    v8::Isolate::Scope isolate_scope(isolate);
+    v8::HandleScope handle_scope(isolate);
+    v8::Local<v8::Context> context = setup_->context();
+    v8::Context::Scope context_scope(context);
+    
+    v8::TryCatch try_catch(isolate);
+    
+    // Create source
+    v8::Local<v8::String> source;
+    if (!v8::String::NewFromUtf8(isolate, code.c_str()).ToLocal(&source)) {
+        return ScriptResult::Err(ErrorCode::InternalError, "Failed to create source");
+    }
+    
+    v8::ScriptCompiler::Source script_source(source);
+    
+    // Create parameter names array
+    std::vector<v8::Local<v8::String>> params;
+    params.reserve(param_names.size());
+    for (const auto& name : param_names) {
+        v8::Local<v8::String> param;
+        if (!v8::String::NewFromUtf8(isolate, name.c_str()).ToLocal(&param)) {
+            return ScriptResult::Err(ErrorCode::InternalError, "Failed to create parameter name");
+        }
+        params.push_back(param);
+    }
+    
+    // Compile as function
+    v8::Local<v8::Function> fn;
+    if (!v8::ScriptCompiler::CompileFunction(
+            context,
+            &script_source,
+            static_cast<int>(params.size()),
+            params.empty() ? nullptr : params.data()).ToLocal(&fn)) {
+        std::string err_msg = "Compile error";
+        if (try_catch.HasCaught()) {
+            v8::Local<v8::Message> msg = try_catch.Message();
+            if (!msg.IsEmpty()) {
+                v8::String::Utf8Value utf8(isolate, msg->Get());
+                if (*utf8) err_msg = *utf8;
+            }
+        }
+        return ScriptResult::Err(ErrorCode::CompileError, err_msg);
+    }
+    
+    // Prepare arguments
+    std::vector<v8::Local<v8::Value>> v8_args;
+    v8_args.reserve(args.size());
+    
+    {
+        std::lock_guard<std::mutex> lock(value_mutex_);
+        for (const auto& arg : args) {
+            if (!arg.HasValue()) {
+                v8_args.push_back(v8::Undefined(isolate));
+                continue;
+            }
+            auto it = value_registry_.find(arg.GetValueId());
+            if (it == value_registry_.end()) {
+                v8_args.push_back(v8::Undefined(isolate));
+                continue;
+            }
+            auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+            v8_args.push_back(global->Get(isolate));
+        }
+    }
+    
+    // Call the function
+    v8::Local<v8::Value> result_val;
+    if (!fn->Call(context, context->Global(), 
+                  static_cast<int>(v8_args.size()),
+                  v8_args.empty() ? nullptr : v8_args.data()).ToLocal(&result_val)) {
+        std::string err_msg = "Execution error";
+        if (try_catch.HasCaught()) {
+            v8::Local<v8::Message> msg = try_catch.Message();
+            if (!msg.IsEmpty()) {
+                v8::String::Utf8Value utf8(isolate, msg->Get());
+                if (*utf8) err_msg = *utf8;
+            }
+        }
+        return ScriptResult::Err(ErrorCode::ExecutionError, err_msg);
+    }
+    
+    // Convert result
+    std::string result_str;
+    {
+        v8::Local<v8::String> str;
+        if (result_val->ToString(context).ToLocal(&str)) {
+            v8::String::Utf8Value utf8(isolate, str);
+            if (*utf8) result_str = *utf8;
+        }
+    }
+    
+    ValueId result_id = RegisterValue(&result_val);
+    ScriptValue result_value(this, result_id);
+    result_value.SetStringResult(result_str);
+    
+    return ScriptResult::Ok(std::move(result_value));
+}
+
+//=============================================================================
+// Sandboxing
+//=============================================================================
+
+void ScriptEnvironment::SetIsolationLevel(IsolationLevel level) {
+    isolation_level_.store(level, std::memory_order_release);
+}
+
+bool ScriptEnvironment::CanAccess(const std::string& capability) const {
+    auto level = isolation_level_.load(std::memory_order_acquire);
+    
+    // Full access allows everything
+    if (level == IsolationLevel::Full) {
+        return true;
+    }
+    
+    // Minimal only allows basic compute
+    if (level == IsolationLevel::Minimal) {
+        // Minimal allows: basic math, string ops, JSON
+        static const std::unordered_set<std::string> minimal_allowed = {
+            "math", "string", "json", "array", "object"
+        };
+        return minimal_allowed.count(capability) > 0;
+    }
+    
+    // Restricted blocks fs, network, process
+    if (level == IsolationLevel::Restricted) {
+        static const std::unordered_set<std::string> restricted_blocked = {
+            "fs", "net", "http", "https", "child_process", "process", "os"
+        };
+        return restricted_blocked.count(capability) == 0;
+    }
+    
+    return false;
+}
+
+//=============================================================================
+// Module Support
+//=============================================================================
+
+void ScriptEnvironment::RegisterModule(const std::string& name, const std::string& code) {
+    std::lock_guard<std::mutex> lock(module_mutex_);
+    modules_[name] = code;
+}
+
+void ScriptEnvironment::RegisterModule(const std::string& name, const char* code) {
+    RegisterModule(name, std::string(code));
+}
+
+void ScriptEnvironment::RegisterModule(const std::string& name, const std::filesystem::path& file) {
+    std::ifstream ifs(file);
+    if (!ifs) return;
+    
+    std::stringstream buffer;
+    buffer << ifs.rdbuf();
+    
+    std::lock_guard<std::mutex> lock(module_mutex_);
+    modules_[name] = buffer.str();
+}
+
+void ScriptEnvironment::UnregisterModule(const std::string& name) {
+    std::lock_guard<std::mutex> lock(module_mutex_);
+    modules_.erase(name);
+}
+
+std::string ScriptEnvironment::GetModule(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(module_mutex_);
+    auto it = modules_.find(name);
+    return it != modules_.end() ? it->second : "";
+}
+
+ScriptResult ScriptEnvironment::RequireModule(const std::string& name) {
+    std::string code;
+    {
+        std::lock_guard<std::mutex> lock(module_mutex_);
+        auto it = modules_.find(name);
+        if (it == modules_.end()) {
+            return ScriptResult::Err(ErrorCode::ModuleNotFound, "Module not found: " + name);
+        }
+        code = it->second;
+    }
+    
+    // Wrap as CommonJS module and execute
+    std::string wrapped = R"(
+        (function() {
+            var module = { exports: {} };
+            var exports = module.exports;
+            )" + code + R"(
+            return module.exports;
+        })()
+    )";
+    
+    return ExecuteSync(wrapped);
+}
+
+void ScriptEnvironment::WatchModule(const std::string& name, ReloadCallback callback) {
+    std::lock_guard<std::mutex> lock(module_mutex_);
+    module_watchers_[name] = std::move(callback);
+}
+
+void ScriptEnvironment::UnwatchModule(const std::string& name) {
+    std::lock_guard<std::mutex> lock(module_mutex_);
+    module_watchers_.erase(name);
+}
+
+void ScriptEnvironment::ReloadModule(const std::string& name) {
+    ReloadCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(module_mutex_);
+        auto it = module_watchers_.find(name);
+        if (it == module_watchers_.end()) return;
+        callback = it->second;
+    }
+    
+    // Call outside lock to prevent deadlocks
+    if (callback) {
+        callback(name);
+    }
+}
+
+//=============================================================================
+// Directive Hooks
+//=============================================================================
+
+void ScriptEnvironment::RegisterDirective(const std::string& name, DirectiveHandler handler) {
+    std::lock_guard<std::mutex> lock(directive_mutex_);
+    directives_[name] = std::move(handler);
+}
+
+void ScriptEnvironment::UnregisterDirective(const std::string& name) {
+    std::lock_guard<std::mutex> lock(directive_mutex_);
+    directives_.erase(name);
+}
+
+std::vector<std::string> ScriptEnvironment::ParseDirectives(const std::string& code) {
+    std::vector<std::string> found;
+    
+    // Match patterns like "use X"; or 'use X'; at start of lines
+    // Simple parsing - look for "use " followed by identifier and ";
+    size_t pos = 0;
+    while (pos < code.size()) {
+        // Skip whitespace
+        while (pos < code.size() && (code[pos] == ' ' || code[pos] == '\t' || code[pos] == '\n' || code[pos] == '\r')) {
+            pos++;
+        }
+        
+        // Check for "use or 'use
+        if (pos + 5 < code.size()) {
+            char quote = code[pos];
+            if ((quote == '"' || quote == '\'') && code.substr(pos + 1, 4) == "use ") {
+                pos += 5;  // Skip quote + "use "
+                
+                // Find directive name (until quote)
+                size_t name_start = pos;
+                while (pos < code.size() && code[pos] != quote) {
+                    pos++;
+                }
+                
+                if (pos < code.size() && code[pos] == quote) {
+                    std::string directive = code.substr(name_start, pos - name_start);
+                    // Trim trailing whitespace from directive name
+                    while (!directive.empty() && directive.back() == ' ') {
+                        directive.pop_back();
+                    }
+                    if (!directive.empty()) {
+                        found.push_back(directive);
+                    }
+                    pos++;  // Skip closing quote
+                    
+                    // Skip to semicolon
+                    while (pos < code.size() && code[pos] != ';') {
+                        pos++;
+                    }
+                    if (pos < code.size()) pos++;  // Skip semicolon
+                    continue;
+                }
+            }
+        }
+        
+        // Not a directive, stop parsing directives
+        break;
+    }
+    
+    return found;
+}
+
+void ScriptEnvironment::ProcessDirectives(const std::string& code) {
+    auto directives_found = ParseDirectives(code);
+    
+    std::lock_guard<std::mutex> lock(directive_mutex_);
+    for (const auto& name : directives_found) {
+        auto it = directives_.find(name);
+        if (it != directives_.end()) {
+            it->second(this, name);
+        }
+    }
 }
 
 EnvironmentMetrics ScriptEnvironment::GetMetrics() {
@@ -433,6 +1032,9 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
         }
     };
     
+    // Process directives (e.g., "use obs";) before compilation
+    ProcessDirectives(script->GetCode());
+    
     // Compile
     v8::Local<v8::String> source; // Script Source as v8::String
     if (!v8::String::NewFromUtf8(isolate, script->GetCode().c_str()).ToLocal(&source)) {
@@ -509,8 +1111,9 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
         if (*utf8) result_str = *utf8;
     }
     
-    // Store the raw V8 value in ScriptResult
-    ScriptResult result_value = ScriptResult::Create(isolate, result);
+    // Register the value and create ScriptResult with env + id
+    ValueId result_id = RegisterValue(&result);
+    ScriptValue result_value(this, result_id);
     result_value.SetStringResult(result_str);
     script->SetResultValue(std::move(result_value));
     
@@ -547,4 +1150,611 @@ void ScriptEnvironment::Cleanup() {
     LOG_INFO("Environment", config_.name + " destroyed");
 }
 
+//=============================================================================
+// Value Registry Implementation
+//=============================================================================
+
+ScriptEnvironment::ValueId ScriptEnvironment::RegisterValue(void* v8_local_ptr) {
+    if (!setup_ || !v8_local_ptr) return INVALID_VALUE_ID;
+    
+    v8::Isolate* isolate = setup_->isolate();
+    v8::Local<v8::Value>* local = static_cast<v8::Local<v8::Value>*>(v8_local_ptr);
+    
+    // Create persistent handle
+    auto* global = new v8::Global<v8::Value>(isolate, *local);
+    
+    ValueId id = next_value_id_.fetch_add(1, std::memory_order_relaxed);
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    value_registry_[id] = { global, 1 };
+    
+    return id;
+}
+
+void ScriptEnvironment::ReleaseValue(ValueId id) {
+    if (id == INVALID_VALUE_ID) return;
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(id);
+    if (it == value_registry_.end()) return;
+    
+    if (--it->second.refcount == 0) {
+        auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+        delete global;
+        value_registry_.erase(it);
+    }
+}
+
+void ScriptEnvironment::AddValueRef(ValueId id) {
+    if (id == INVALID_VALUE_ID) return;
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(id);
+    if (it != value_registry_.end()) {
+        ++it->second.refcount;
+    }
+}
+
+bool ScriptEnvironment::HasValue(ValueId id) const {
+    if (id == INVALID_VALUE_ID) return false;
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    return value_registry_.find(id) != value_registry_.end();
+}
+
+ScriptEnvironment::ValueType ScriptEnvironment::GetValueType(ValueId id) {
+    if (!HasValue(id) || !setup_) return ValueType::Unknown;
+    
+    V8Scope scope(this);
+    if (!scope) return ValueType::Unknown;
+    v8::Isolate* isolate = scope.GetIsolate();
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(id);
+    if (it == value_registry_.end()) return ValueType::Unknown;
+    
+    auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+    v8::Local<v8::Value> val = global->Get(isolate);
+    
+    if (val->IsUndefined()) return ValueType::Undefined;
+    if (val->IsNull()) return ValueType::Null;
+    if (val->IsBoolean()) return ValueType::Boolean;
+    if (val->IsNumber()) return ValueType::Number;
+    if (val->IsString()) return ValueType::String;
+    if (val->IsFunction()) return ValueType::Function;
+    if (val->IsArray()) return ValueType::Array;
+    if (val->IsObject()) return ValueType::Object;
+    return ValueType::Unknown;
+}
+
+std::string ScriptEnvironment::ValueToString(ValueId id) {
+    if (!HasValue(id) || !setup_) return "";
+    
+    V8Scope scope(this);
+    if (!scope) return "";
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(id);
+    if (it == value_registry_.end()) return "";
+    
+    auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+    v8::Local<v8::Value> val = global->Get(isolate);
+    
+    v8::Local<v8::String> str;
+    if (!val->ToString(context).ToLocal(&str)) return "";
+    
+    v8::String::Utf8Value utf8(isolate, str);
+    return *utf8 ? *utf8 : "";
+}
+
+std::optional<double> ScriptEnvironment::ValueToNumber(ValueId id) {
+    if (!HasValue(id) || !setup_) return std::nullopt;
+    
+    V8Scope scope(this);
+    if (!scope) return std::nullopt;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(id);
+    if (it == value_registry_.end()) return std::nullopt;
+    
+    auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+    v8::Local<v8::Value> val = global->Get(isolate);
+    
+    if (!val->IsNumber()) return std::nullopt;
+    return val->NumberValue(context).FromMaybe(0.0);
+}
+
+std::optional<bool> ScriptEnvironment::ValueToBool(ValueId id) {
+    if (!HasValue(id) || !setup_) return std::nullopt;
+    
+    V8Scope scope(this);
+    if (!scope) return std::nullopt;
+    v8::Isolate* isolate = scope.GetIsolate();
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(id);
+    if (it == value_registry_.end()) return std::nullopt;
+    
+    auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+    v8::Local<v8::Value> val = global->Get(isolate);
+    
+    return val->BooleanValue(isolate);
+}
+
+std::optional<int64_t> ScriptEnvironment::ValueToInt64(ValueId id) {
+    if (!HasValue(id) || !setup_) return std::nullopt;
+    
+    V8Scope scope(this);
+    if (!scope) return std::nullopt;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(id);
+    if (it == value_registry_.end()) return std::nullopt;
+    
+    auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+    v8::Local<v8::Value> val = global->Get(isolate);
+    
+    if (!val->IsNumber()) return std::nullopt;
+    return val->IntegerValue(context).FromMaybe(0);
+}
+
+std::string ScriptEnvironment::ValueToJson(ValueId id) {
+    if (!HasValue(id) || !setup_) return "null";
+    
+    V8Scope scope(this);
+    if (!scope) return "null";
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(id);
+    if (it == value_registry_.end()) return "null";
+    
+    auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+    v8::Local<v8::Value> val = global->Get(isolate);
+    
+    // Use JSON.stringify for proper serialization
+    v8::Local<v8::String> json_str;
+    if (!v8::JSON::Stringify(context, val).ToLocal(&json_str)) {
+        return "null";
+    }
+    
+    v8::String::Utf8Value utf8(isolate, json_str);
+    return *utf8 ? *utf8 : "null";
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::GetProperty(ValueId obj_id, const std::string& key) {
+    if (!HasValue(obj_id) || !setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    v8::Local<v8::Value> obj_val;
+    {
+        std::lock_guard<std::mutex> lock(value_mutex_);
+        auto it = value_registry_.find(obj_id);
+        if (it == value_registry_.end()) return INVALID_VALUE_ID;
+        auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+        obj_val = global->Get(isolate);
+    }
+    
+    if (!obj_val->IsObject()) return INVALID_VALUE_ID;
+    v8::Local<v8::Object> obj = obj_val.As<v8::Object>();
+    
+    v8::Local<v8::String> v8_key = v8::String::NewFromUtf8(isolate, key.c_str()).ToLocalChecked();
+    v8::MaybeLocal<v8::Value> maybe = obj->Get(context, v8_key);
+    
+    v8::Local<v8::Value> result;
+    if (!maybe.ToLocal(&result)) return INVALID_VALUE_ID;
+    
+    return RegisterValue(&result);
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::GetArrayElement(ValueId arr_id, uint32_t index) {
+    if (!HasValue(arr_id) || !setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    v8::Local<v8::Value> arr_val;
+    {
+        std::lock_guard<std::mutex> lock(value_mutex_);
+        auto it = value_registry_.find(arr_id);
+        if (it == value_registry_.end()) return INVALID_VALUE_ID;
+        auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+        arr_val = global->Get(isolate);
+    }
+    
+    if (!arr_val->IsArray()) return INVALID_VALUE_ID;
+    v8::Local<v8::Array> arr = arr_val.As<v8::Array>();
+    
+    v8::MaybeLocal<v8::Value> maybe = arr->Get(context, index);
+    v8::Local<v8::Value> result;
+    if (!maybe.ToLocal(&result)) return INVALID_VALUE_ID;
+    
+    return RegisterValue(&result);
+}
+
+bool ScriptEnvironment::SetProperty(ValueId obj_id, const std::string& key, ValueId value_id) {
+    if (!HasValue(obj_id) || !HasValue(value_id) || !setup_) return false;
+    
+    V8Scope scope(this);
+    if (!scope) return false;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    v8::Local<v8::Value> obj_val, val;
+    {
+        std::lock_guard<std::mutex> lock(value_mutex_);
+        auto obj_it = value_registry_.find(obj_id);
+        auto val_it = value_registry_.find(value_id);
+        if (obj_it == value_registry_.end() || val_it == value_registry_.end()) return false;
+        
+        obj_val = static_cast<v8::Global<v8::Value>*>(obj_it->second.global_ptr)->Get(isolate);
+        val = static_cast<v8::Global<v8::Value>*>(val_it->second.global_ptr)->Get(isolate);
+    }
+    
+    if (!obj_val->IsObject()) return false;
+    v8::Local<v8::Object> obj = obj_val.As<v8::Object>();
+    v8::Local<v8::String> v8_key = v8::String::NewFromUtf8(isolate, key.c_str()).ToLocalChecked();
+    
+    return obj->Set(context, v8_key, val).FromMaybe(false);
+}
+
+std::optional<uint32_t> ScriptEnvironment::GetLength(ValueId id) {
+    if (!HasValue(id) || !setup_) return std::nullopt;
+    
+    V8Scope scope(this);
+    if (!scope) return std::nullopt;
+    v8::Isolate* isolate = scope.GetIsolate();
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(id);
+    if (it == value_registry_.end()) return std::nullopt;
+    
+    auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+    v8::Local<v8::Value> val = global->Get(isolate);
+    
+    if (val->IsArray()) return val.As<v8::Array>()->Length();
+    if (val->IsString()) return val.As<v8::String>()->Length();
+    return std::nullopt;
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::InvokeFunction(ValueId func_id, const std::vector<ValueId>& args) {
+    if (!HasValue(func_id) || !setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    v8::Local<v8::Value> func_val;
+    {
+        std::lock_guard<std::mutex> lock(value_mutex_);
+        auto it = value_registry_.find(func_id);
+        if (it == value_registry_.end()) return INVALID_VALUE_ID;
+        func_val = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr)->Get(isolate);
+    }
+    
+    if (!func_val->IsFunction()) return INVALID_VALUE_ID;
+    v8::Local<v8::Function> func = func_val.As<v8::Function>();
+    
+    std::vector<v8::Local<v8::Value>> v8_args;
+    v8_args.reserve(args.size());
+    {
+        std::lock_guard<std::mutex> lock(value_mutex_);
+        for (ValueId arg_id : args) {
+            auto it = value_registry_.find(arg_id);
+            if (it != value_registry_.end()) {
+                v8_args.push_back(static_cast<v8::Global<v8::Value>*>(it->second.global_ptr)->Get(isolate));
+            } else {
+                v8_args.push_back(v8::Undefined(isolate));
+            }
+        }
+    }
+    
+    v8::TryCatch try_catch(isolate);
+    v8::MaybeLocal<v8::Value> maybe = func->Call(
+        context, context->Global(),
+        static_cast<int>(v8_args.size()),
+        v8_args.empty() ? nullptr : v8_args.data()
+    );
+    
+    if (try_catch.HasCaught()) return INVALID_VALUE_ID;
+    
+    v8::Local<v8::Value> result;
+    if (!maybe.ToLocal(&result)) return INVALID_VALUE_ID;
+    
+    return RegisterValue(&result);
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::CallMethod(ValueId obj_id, const std::string& method, const std::vector<ValueId>& args) {
+    if (!HasValue(obj_id) || !setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    // Get the object
+    v8::Local<v8::Value> obj_val;
+    {
+        std::lock_guard<std::mutex> lock(value_mutex_);
+        auto it = value_registry_.find(obj_id);
+        if (it == value_registry_.end()) return INVALID_VALUE_ID;
+        obj_val = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr)->Get(isolate);
+    }
+    
+    if (!obj_val->IsObject()) return INVALID_VALUE_ID;
+    v8::Local<v8::Object> obj = obj_val.As<v8::Object>();
+    
+    // Get the method
+    v8::Local<v8::String> v8_method = v8::String::NewFromUtf8(isolate, method.c_str()).ToLocalChecked();
+    v8::MaybeLocal<v8::Value> maybe_func = obj->Get(context, v8_method);
+    v8::Local<v8::Value> func_val;
+    if (!maybe_func.ToLocal(&func_val) || !func_val->IsFunction()) {
+        return INVALID_VALUE_ID;
+    }
+    v8::Local<v8::Function> func = func_val.As<v8::Function>();
+    
+    // Build arguments
+    std::vector<v8::Local<v8::Value>> v8_args;
+    v8_args.reserve(args.size());
+    {
+        std::lock_guard<std::mutex> lock(value_mutex_);
+        for (ValueId arg_id : args) {
+            auto it = value_registry_.find(arg_id);
+            if (it != value_registry_.end()) {
+                v8_args.push_back(static_cast<v8::Global<v8::Value>*>(it->second.global_ptr)->Get(isolate));
+            } else {
+                v8_args.push_back(v8::Undefined(isolate));
+            }
+        }
+    }
+    
+    // Call with obj as 'this'
+    v8::TryCatch try_catch(isolate);
+    v8::MaybeLocal<v8::Value> maybe_result = func->Call(
+        context, obj,  // 'this' = the object
+        static_cast<int>(v8_args.size()),
+        v8_args.empty() ? nullptr : v8_args.data()
+    );
+    
+    if (try_catch.HasCaught()) return INVALID_VALUE_ID;
+    
+    v8::Local<v8::Value> result;
+    if (!maybe_result.ToLocal(&result)) return INVALID_VALUE_ID;
+    
+    return RegisterValue(&result);
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::CreateNumber(double value) {
+    if (!setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    
+    v8::Local<v8::Value> val = v8::Number::New(isolate, value);
+    return RegisterValue(&val);
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::CreateString(const std::string& value) {
+    if (!setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    
+    v8::Local<v8::Value> val = v8::String::NewFromUtf8(isolate, value.c_str()).ToLocalChecked();
+    return RegisterValue(&val);
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::CreateBool(bool value) {
+    if (!setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    
+    v8::Local<v8::Value> val = v8::Boolean::New(isolate, value);
+    return RegisterValue(&val);
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::CreateUndefined() {
+    if (!setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    
+    v8::Local<v8::Value> val = v8::Undefined(isolate);
+    return RegisterValue(&val);
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::CreateNull() {
+    if (!setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    
+    v8::Local<v8::Value> val = v8::Null(isolate);
+    return RegisterValue(&val);
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::CreateArray(size_t length) {
+    if (!setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    
+    v8::Local<v8::Array> arr = v8::Array::New(isolate, static_cast<int>(length));
+    v8::Local<v8::Value> val = arr;
+    return RegisterValue(&val);
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::CreateObject() {
+    if (!setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    
+    v8::Local<v8::Object> obj = v8::Object::New(isolate);
+    v8::Local<v8::Value> val = obj;
+    return RegisterValue(&val);
+}
+
+std::vector<std::string> ScriptEnvironment::GetObjectKeys(ValueId obj_id) {
+    std::vector<std::string> result;
+    if (!HasValue(obj_id) || !setup_) return result;
+    
+    V8Scope scope(this);
+    if (!scope) return result;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(obj_id);
+    if (it == value_registry_.end()) return result;
+    
+    auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+    v8::Local<v8::Value> val = global->Get(isolate);
+    
+    if (!val->IsObject()) return result;
+    
+    v8::Local<v8::Object> obj = val.As<v8::Object>();
+    v8::Local<v8::Array> keys;
+    if (!obj->GetOwnPropertyNames(context).ToLocal(&keys)) return result;
+    
+    for (uint32_t i = 0; i < keys->Length(); i++) {
+        v8::Local<v8::Value> key;
+        if (keys->Get(context, i).ToLocal(&key)) {
+            v8::String::Utf8Value utf8(isolate, key);
+            if (*utf8) result.push_back(*utf8);
+        }
+    }
+    
+    return result;
+}
+
+void ScriptEnvironment::SetGlobal(const std::string& name, ValueId value_id) {
+    if (!HasValue(value_id) || !setup_) return;
+    
+    V8Scope scope(this);
+    if (!scope) return;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(value_id);
+    if (it == value_registry_.end()) return;
+    
+    auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+    v8::Local<v8::Value> val = global->Get(isolate);
+    
+    v8::Local<v8::String> key = v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked();
+    context->Global()->Set(context, key, val).Check();
+}
+
+void ScriptEnvironment::SetGlobal(const std::string& name, double value) {
+    if (!setup_) return;
+    
+    V8Scope scope(this);
+    if (!scope) return;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    v8::Local<v8::String> key = v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked();
+    v8::Local<v8::Number> val = v8::Number::New(isolate, value);
+    context->Global()->Set(context, key, val).Check();
+}
+
+void ScriptEnvironment::SetGlobal(const std::string& name, const std::string& value) {
+    if (!setup_) return;
+    
+    V8Scope scope(this);
+    if (!scope) return;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    v8::Local<v8::String> key = v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked();
+    v8::Local<v8::String> val = v8::String::NewFromUtf8(isolate, value.c_str()).ToLocalChecked();
+    context->Global()->Set(context, key, val).Check();
+}
+
+void ScriptEnvironment::SetGlobal(const std::string& name, const char* value) {
+    SetGlobal(name, std::string(value));
+}
+
+void ScriptEnvironment::SetGlobal(const std::string& name, bool value) {
+    if (!setup_) return;
+    
+    V8Scope scope(this);
+    if (!scope) return;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    v8::Local<v8::String> key = v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked();
+    v8::Local<v8::Boolean> val = v8::Boolean::New(isolate, value);
+    context->Global()->Set(context, key, val).Check();
+}
+
+ScriptEnvironment::ValueId ScriptEnvironment::GetGlobal(const std::string& name) {
+    if (!setup_) return INVALID_VALUE_ID;
+    
+    V8Scope scope(this);
+    if (!scope) return INVALID_VALUE_ID;
+    v8::Isolate* isolate = scope.GetIsolate();
+    v8::Local<v8::Context> context = scope.GetContext();
+    
+    v8::Local<v8::String> key = v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked();
+    v8::Local<v8::Value> val;
+    if (!context->Global()->Get(context, key).ToLocal(&val)) {
+        return INVALID_VALUE_ID;
+    }
+    
+    return RegisterValue(&val);
+}
+
+//=============================================================================
+// Sandbox Context Support
+//=============================================================================
+
+SandboxContextPtr ScriptEnvironment::CreateSandbox(const std::string& name) {
+    auto sandbox = std::make_shared<SandboxContext>(this, name);
+    if (!sandbox->Initialize()) {
+        return nullptr;
+    }
+    return sandbox;
+}
+
+SandboxContextPtr ScriptEnvironment::CreateSandbox(const std::map<std::string, ScriptValue>& sandbox_values, 
+                                                     const std::string& name) {
+    auto sandbox = std::make_shared<SandboxContext>(this, name);
+    if (!sandbox->Initialize(sandbox_values)) {
+        return nullptr;
+    }
+    return sandbox;
+}
+
+ScriptEnvironment::ValueEntry* ScriptEnvironment::GetValueEntry(ValueId id) {
+    std::lock_guard<std::mutex> lock(value_mutex_);
+    auto it = value_registry_.find(id);
+    if (it == value_registry_.end()) return nullptr;
+    return &it->second;
+}
+
 } // namespace experiments
+

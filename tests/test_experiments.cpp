@@ -49,7 +49,7 @@ TEST_CASE("Test 1: Basic Execution", "[script][exec]") {
     auto result = engine.ExecuteSync("40 + 2;");
     
     REQUIRE(result.IsOk());
-    CHECK(result.Value() == "42");
+    CHECK(result.ToString() == "42");
 }
 
 TEST_CASE("Test 2: Script Timeout", "[script][timeout]") {
@@ -299,8 +299,8 @@ TEST_CASE("Test 6: Custom Environment", "[script][environment]") {
 
         REQUIRE(env);
 
-        CHECK(env->ExecuteSync("API_VERSION;", 2s).Value() == "2.0");
-        CHECK(env->ExecuteSync("DEBUG;", 2s).Value() == "true");
+        CHECK(env->ExecuteSync("API_VERSION;", 2s).ToString() == "2.0");
+        CHECK(env->ExecuteSync("DEBUG;", 2s).ToString() == "true");
     }
 
     SECTION("6.2 Isolation") {
@@ -311,8 +311,8 @@ TEST_CASE("Test 6: Custom Environment", "[script][environment]") {
         auto env1 = engine.CreateEnvironment(c1);
         auto env2 = engine.CreateEnvironment(c2);
 
-        CHECK(env1->ExecuteSync("id;", 1s).Value() == "1");
-        CHECK(env2->ExecuteSync("id;", 1s).Value() == "2");
+        CHECK(env1->ExecuteSync("id;", 1s).ToString() == "1");
+        CHECK(env2->ExecuteSync("id;", 1s).ToString() == "2");
     }
 
     SECTION("6.3 Multi-script Execution") {
@@ -326,7 +326,7 @@ TEST_CASE("Test 6: Custom Environment", "[script][environment]") {
         env->ExecuteSync("cnt++;", 1s);
         env->ExecuteSync("cnt++;", 1s);
 
-        CHECK(env->ExecuteSync("cnt;", 1s).Value() == "3");
+        CHECK(env->ExecuteSync("cnt;", 1s).ToString() == "3");
     }
 
     SECTION("6.4 Default Timeout") {
@@ -2481,7 +2481,7 @@ TEST_CASE("Test 33: ScriptResult Function Calling", "[script][result][call]") {
         auto& arg1 = argScript1->GetResultValue();
         auto& arg2 = argScript2->GetResultValue();
         
-        std::vector<ScriptResult*> args = {&arg1, &arg2};
+        std::vector<ScriptValue*> args = {&arg1, &arg2};
         auto result = func.Call(args);
         
         REQUIRE(result.HasValue());
@@ -2570,11 +2570,1125 @@ TEST_CASE("Test 33: ScriptResult Function Calling", "[script][result][call]") {
     }
 }
 
+//=============================================================================
+// Test 34: ScriptResult API
+//=============================================================================
+
+TEST_CASE("Test 34: ScriptResult API", "[script][result]") {
+    auto& engine = ScriptEngine::Instance();
+    
+    SECTION("34.1 IsOk and IsError for success") {
+        auto result = engine.ExecuteSync("42");
+        
+        CHECK(result.IsOk());
+        CHECK_FALSE(result.IsError());
+        CHECK(static_cast<bool>(result) == true);  // operator bool
+    }
+    
+    SECTION("34.2 IsOk and IsError for failure") {
+        auto result = engine.ExecuteSync("throw new Error('test error')");
+        
+        CHECK_FALSE(result.IsOk());
+        CHECK(result.IsError());
+        CHECK(static_cast<bool>(result) == false);
+    }
+    
+    SECTION("34.3 Value access on success") {
+        auto result = engine.ExecuteSync("'hello world'");
+        
+        REQUIRE(result.IsOk());
+        ScriptValue& val = result.Value();
+        CHECK(val.HasValue());
+        CHECK(val.IsString());
+        CHECK(val.ToString() == "hello world");
+    }
+    
+    SECTION("34.4 Error access on failure") {
+        auto result = engine.ExecuteSync("throw new Error('custom error')");
+        
+        REQUIRE(result.IsError());
+        ScriptError& err = result.Error();
+        CHECK(err.code == ErrorCode::RuntimeError);
+        CHECK(err.message.find("custom error") != std::string::npos);
+    }
+    
+    SECTION("34.5 Value throws on error") {
+        auto result = engine.ExecuteSync("throw 'fail'");
+        CHECK(result.IsError());
+        CHECK_THROWS_AS(result.Value(), std::runtime_error);
+    }
+    
+    SECTION("34.6 Error throws on success") {
+        auto result = engine.ExecuteSync("123");
+        CHECK(result.IsOk());
+        CHECK_THROWS_AS(result.Error(), std::runtime_error);
+    }
+    
+    SECTION("34.7 TryValue safe access") {
+        auto success = engine.ExecuteSync("100");
+        auto failure = engine.ExecuteSync("undefined_var.prop");
+        
+        CHECK(success.TryValue() != nullptr);
+        CHECK(success.TryError() == nullptr);
+        
+        CHECK(failure.TryValue() == nullptr);
+        CHECK(failure.TryError() != nullptr);
+    }
+    
+    SECTION("34.8 ToString convenience") {
+        auto numResult = engine.ExecuteSync("99.5");
+        auto strResult = engine.ExecuteSync("'test string'");
+        auto errResult = engine.ExecuteSync("null.x");
+        
+        CHECK(numResult.ToString() == "99.5");
+        CHECK(strResult.ToString() == "test string");
+        // On error, ToString returns error message
+        CHECK(errResult.ToString().find("null") != std::string::npos);
+    }
+    
+    SECTION("34.9 ToNumber and ToBool convenience") {
+        auto numResult = engine.ExecuteSync("42.5");
+        auto boolResult = engine.ExecuteSync("true");
+        auto errResult = engine.ExecuteSync("throw 'x'");
+        
+        CHECK(numResult.ToNumber().value_or(-1) == 42.5);
+        CHECK(boolResult.ToBool().value_or(false) == true);
+        
+        // On error, returns nullopt
+        CHECK_FALSE(errResult.ToNumber().has_value());
+        CHECK_FALSE(errResult.ToBool().has_value());
+    }
+    
+    SECTION("34.10 Chained operations on ScriptValue") {
+        auto result = engine.ExecuteSync("({ a: { b: { c: 42 } } })");
+        
+        REQUIRE(result.IsOk());
+        auto& val = result.Value();
+        
+        // Chain Get operations
+        auto c = val.Get("a").Get("b").Get("c");
+        CHECK(c.HasValue());
+        CHECK(c.ToNumber().value_or(0) == 42);
+    }
+    
+    SECTION("34.11 ScriptError stack trace") {
+        auto result = engine.ExecuteSync(R"(
+            function inner() { throw new Error('deep'); }
+            function outer() { inner(); }
+            outer();
+        )");
+        
+        REQUIRE(result.IsError());
+        auto& err = result.Error();
+        CHECK(!err.stack.empty());
+        CHECK(err.stack.find("inner") != std::string::npos);
+        CHECK(err.stack.find("outer") != std::string::npos);
+    }
+}
+
+//=============================================================================
+// Test 35: ScriptResult Monadic Operations
+//=============================================================================
+
+TEST_CASE("Test 35: ScriptResult Monadic Operations", "[script][result][monad]") {
+    auto& engine = ScriptEngine::Instance();
+    
+    SECTION("35.1 Transform on success") {
+        auto result = engine.ExecuteSync("42");
+        REQUIRE(result.IsOk());
+        
+        // Transform applies function to value
+        int transformed = 0;
+        result.Transform([&](const ScriptValue& v) {
+            transformed = static_cast<int>(v.ToNumber().value_or(0));
+            return v;  // Must return ScriptValue
+        });
+        CHECK(transformed == 42);
+    }
+    
+    SECTION("35.2 Transform propagates error") {
+        auto result = engine.ExecuteSync("throw 'test'");
+        REQUIRE(result.IsError());
+        
+        bool called = false;
+        auto transformed = result.Transform([&](const ScriptValue& v) {
+            called = true;
+            return v;
+        });
+        
+        CHECK_FALSE(called);  // Function not called on error
+        CHECK(transformed.IsError());
+    }
+    
+    SECTION("35.3 AndThen chains operations") {
+        // Create a script that returns code to execute
+        auto result = engine.ExecuteSync("'1 + 2'");
+        REQUIRE(result.IsOk());
+        
+        // Chain to execute the returned code
+        auto chained = result.AndThen([&](const ScriptValue& v) {
+            return engine.ExecuteSync(v.ToString());
+        });
+        
+        REQUIRE(chained.IsOk());
+        CHECK(chained.ToNumber().value_or(0) == 3);
+    }
+    
+    SECTION("35.4 AndThen short-circuits on error") {
+        auto result = engine.ExecuteSync("throw 'first error'");
+        
+        bool called = false;
+        auto chained = result.AndThen([&](const ScriptValue& v) {
+            called = true;
+            return engine.ExecuteSync("unreachable");
+        });
+        
+        CHECK_FALSE(called);
+        CHECK(chained.IsError());
+    }
+    
+    SECTION("35.5 OrElse provides fallback") {
+        auto result = engine.ExecuteSync("throw 'error'");
+        REQUIRE(result.IsError());
+        
+        auto recovered = result.OrElse([&](const ScriptError& e) {
+            return engine.ExecuteSync("'recovered'");
+        });
+        
+        REQUIRE(recovered.IsOk());
+        CHECK(recovered.ToString() == "recovered");
+    }
+    
+    SECTION("35.6 OrElse passthrough on success") {
+        auto result = engine.ExecuteSync("'original'");
+        
+        bool called = false;
+        auto same = result.OrElse([&](const ScriptError& e) {
+            called = true;
+            return engine.ExecuteSync("'fallback'");
+        });
+        
+        CHECK_FALSE(called);
+        CHECK(same.ToString() == "original");
+    }
+    
+    SECTION("35.7 Match on success") {
+        auto result = engine.ExecuteSync("100");
+        
+        std::string matched = result.Match(
+            [](const ScriptValue& v) { return "ok:" + v.ToString(); },
+            [](const ScriptError& e) { return "err:" + e.message; }
+        );
+        
+        CHECK(matched == "ok:100");
+    }
+    
+    SECTION("35.8 Match on error") {
+        auto result = engine.ExecuteSync("throw new Error('fail')");
+        
+        std::string matched = result.Match(
+            [](const ScriptValue& v) { return "ok"; },
+            [](const ScriptError& e) { return "err"; }
+        );
+        
+        CHECK(matched == "err");
+    }
+    
+    SECTION("35.9 Inspect for side effects") {
+        auto result = engine.ExecuteSync("'inspected'");
+        
+        std::string captured;
+        result.Inspect([&](const ScriptValue& v) {
+            captured = v.ToString();
+        });
+        
+        CHECK(captured == "inspected");
+    }
+    
+    SECTION("35.10 InspectError for error side effects") {
+        auto result = engine.ExecuteSync("throw new Error('logged')");
+        
+        std::string captured;
+        result.InspectError([&](const ScriptError& e) {
+            captured = e.message;
+        });
+        
+        CHECK(captured.find("logged") != std::string::npos);
+    }
+    
+    SECTION("35.11 Method chaining") {
+        // Demonstrate fluent API with chaining
+        std::string log;
+        
+        auto result = engine.ExecuteSync("50")
+            .Inspect([&](const ScriptValue& v) { log += "got:" + v.ToString() + ";"; })
+            .Transform([](const ScriptValue& v) { return v; })  // identity
+            .Inspect([&](const ScriptValue& v) { log += "done;"; });
+        
+        CHECK(result.IsOk());
+        CHECK(log == "got:50;done;");
+    }
+}
+
+//=============================================================================
+// Test 36: V8 Locker/Unlocker Mechanism and Nested Value Access
+//=============================================================================
+
+TEST_CASE("Test 36: V8 Locker/Unlocker and Nested Access", "[script][locker][value]") {
+    auto& engine = ScriptEngine::Instance();
+    
+    SECTION("36.1 Sequential execution and value access") {
+        auto r1 = engine.ExecuteSync("42");
+        REQUIRE(r1.IsOk());
+        CHECK(r1.ToNumber().value_or(0) == 42);
+        
+        auto r2 = engine.ExecuteSync("'hello'");
+        REQUIRE(r2.IsOk());
+        CHECK(r2.ToString() == "hello");
+        
+        // First result still valid
+        CHECK(r1.Value().IsNumber());
+    }
+    
+    SECTION("36.2 Function exec then Call") {
+        auto funcRes = engine.ExecuteSync("(function(x) { return x * 2; })");
+        REQUIRE(funcRes.IsOk());
+        REQUIRE(funcRes.Value().IsFunction());
+        
+        auto argRes = engine.ExecuteSync("21");
+        REQUIRE(argRes.IsOk());
+        
+        std::vector<ScriptValue*> args = {&argRes.Value()};
+        auto callRes = funcRes.Value().Call(args);
+        REQUIRE(callRes.HasValue());
+        CHECK(callRes.ToNumber().value_or(0) == 42);
+    }
+    
+    SECTION("36.3 Object then CallMethod") {
+        auto objRes = engine.ExecuteSync(R"(
+            ({ value: 10, multiply: function(x) { return this.value * x; } })
+        )");
+        REQUIRE(objRes.IsOk());
+        
+        auto argRes = engine.ExecuteSync("5");
+        std::vector<ScriptValue*> args = {&argRes.Value()};
+        
+        auto result = objRes.Value().CallMethod("multiply", args);
+        REQUIRE(result.HasValue());
+        CHECK(result.ToNumber().value_or(0) == 50);
+    }
+    
+    SECTION("36.4 Nested property chain") {
+        auto res = engine.ExecuteSync("({ a: { b: { c: { d: 'deep' } } } })");
+        REQUIRE(res.IsOk());
+        
+        auto d = res.Value().Get("a").Get("b").Get("c").Get("d");
+        REQUIRE(d.HasValue());
+        CHECK(d.ToString() == "deep");
+    }
+    
+    SECTION("36.5 Interleaved exec and access") {
+        auto r1 = engine.ExecuteSync("({ n: 1 })");
+        auto r2 = engine.ExecuteSync("({ n: 2 })");
+        
+        CHECK(r1.Value().Get("n").ToNumber().value_or(0) == 1);
+        
+        auto r3 = engine.ExecuteSync("({ n: 3 })");
+        
+        CHECK(r2.Value().Get("n").ToNumber().value_or(0) == 2);
+        CHECK(r3.Value().Get("n").ToNumber().value_or(0) == 3);
+        CHECK(r1.Value().Get("n").ToNumber().value_or(0) == 1);
+    }
+    
+    SECTION("36.6 Currying (function returning function)") {
+        auto res = engine.ExecuteSync("(a => b => a + b)");
+        REQUIRE(res.IsOk());
+        
+        auto arg10 = engine.ExecuteSync("10");
+        std::vector<ScriptValue*> a1 = {&arg10.Value()};
+        auto inner = res.Value().Call(a1);
+        REQUIRE(inner.HasValue());
+        REQUIRE(inner.IsFunction());
+        
+        auto arg5 = engine.ExecuteSync("5");
+        std::vector<ScriptValue*> a2 = {&arg5.Value()};
+        auto final = inner.Call(a2);
+        CHECK(final.ToNumber().value_or(0) == 15);
+    }
+    
+    SECTION("36.7 Array iteration") {
+        auto res = engine.ExecuteSync("[10, 20, 30, 40, 50]");
+        REQUIRE(res.IsOk());
+        
+        auto len = res.Value().Length();
+        REQUIRE(len.value_or(0) == 5);
+        
+        double sum = 0;
+        for (uint32_t i = 0; i < *len; i++) {
+            sum += res.Value().Get(i).ToNumber().value_or(0);
+        }
+        CHECK(sum == 150);
+    }
+    
+    SECTION("36.8 Method chaining on returned objects") {
+        auto res = engine.ExecuteSync(R"(
+            ({ v: 1, add: function(x) { return { v: this.v + x, add: this.add, mul: this.mul }; },
+                      mul: function(x) { return { v: this.v * x, add: this.add, mul: this.mul }; } })
+        )");
+        REQUIRE(res.IsOk());
+        
+        auto a5 = engine.ExecuteSync("5");
+        auto a2 = engine.ExecuteSync("2");
+        auto a3 = engine.ExecuteSync("3");
+        
+        std::vector<ScriptValue*> v5 = {&a5.Value()};
+        std::vector<ScriptValue*> v2 = {&a2.Value()};
+        std::vector<ScriptValue*> v3 = {&a3.Value()};
+        
+        // Chain: 1 + 5 = 6, * 2 = 12, + 3 = 15
+        auto s1 = res.Value().CallMethod("add", v5);
+        auto s2 = s1.CallMethod("mul", v2);
+        auto s3 = s2.CallMethod("add", v3);
+        
+        CHECK(s3.Get("v").ToNumber().value_or(0) == 15);
+    }
+    
+    SECTION("36.9 All value types in sequence") {
+        auto num = engine.ExecuteSync("123");
+        auto str = engine.ExecuteSync("'test'");
+        auto boolV = engine.ExecuteSync("true");
+        auto obj = engine.ExecuteSync("({})");
+        auto arr = engine.ExecuteSync("[]");
+        auto fn = engine.ExecuteSync("(function(){})");
+        auto null = engine.ExecuteSync("null");
+        auto undef = engine.ExecuteSync("undefined");
+        
+        CHECK(num.Value().IsNumber());
+        CHECK(str.Value().IsString());
+        CHECK(boolV.Value().IsBoolean());
+        CHECK(obj.Value().IsObject());
+        CHECK(arr.Value().IsArray());
+        CHECK(fn.Value().IsFunction());
+        CHECK(null.Value().IsNull());
+        CHECK(undef.Value().IsUndefined());
+    }
+    
+    SECTION("36.10 Deep nesting with mixed operations") {
+        auto res = engine.ExecuteSync(R"(
+            ({ calc: { compute: function(a, b) {
+                return { sum: a + b, prod: a * b };
+            }}})
+        )");
+        REQUIRE(res.IsOk());
+        
+        auto a7 = engine.ExecuteSync("7");
+        auto a6 = engine.ExecuteSync("6");
+        std::vector<ScriptValue*> args = {&a7.Value(), &a6.Value()};
+        
+        auto calc = res.Value().Get("calc");
+        auto computed = calc.CallMethod("compute", args);
+        
+        CHECK(computed.Get("sum").ToNumber().value_or(0) == 13);
+        CHECK(computed.Get("prod").ToNumber().value_or(0) == 42);
+    }
+}
+
+//=============================================================================
+// Test 37: New API Features
+//=============================================================================
+
+TEST_CASE("Test 37: New API Features", "[script][api]") {
+    auto& engine = ScriptEngine::Instance();
+    
+    SECTION("37.1 operator[] for property access") {
+        auto res = engine.ExecuteSync("({ a: { b: { c: 42 } } })");
+        REQUIRE(res.IsOk());
+        
+        // Use operator[] instead of Get()
+        auto val = res.Value()["a"]["b"]["c"];
+        REQUIRE(val.HasValue());
+        CHECK(val.ToNumber().value_or(0) == 42);
+    }
+    
+    SECTION("37.2 operator[] for array access") {
+        auto res = engine.ExecuteSync("[10, 20, 30]");
+        REQUIRE(res.IsOk());
+        
+        CHECK(res.Value()[0].ToNumber().value_or(0) == 10);
+        CHECK(res.Value()[1].ToNumber().value_or(0) == 20);
+        CHECK(res.Value()[2].ToNumber().value_or(0) == 30);
+    }
+    
+    SECTION("37.3 As<T>() template extraction") {
+        auto res = engine.ExecuteSync("({ num: 42.5, str: 'hello', flag: true })");
+        REQUIRE(res.IsOk());
+        
+        auto num = res.Value()["num"].As<double>();
+        auto intNum = res.Value()["num"].As<int>();
+        auto str = res.Value()["str"].As<std::string>();
+        auto flag = res.Value()["flag"].As<bool>();
+        
+        CHECK(num.value_or(0) == 42.5);
+        CHECK(intNum.value_or(0) == 42);
+        CHECK(str.value_or("") == "hello");
+        CHECK(flag.value_or(false) == true);
+    }
+    
+    SECTION("37.4 Array iteration with range-for") {
+        auto res = engine.ExecuteSync("[1, 2, 3, 4, 5]");
+        REQUIRE(res.IsOk());
+        
+        double sum = 0;
+        for (auto elem : res.Value()) {
+            sum += elem.ToNumber().value_or(0);
+        }
+        CHECK(sum == 15);
+    }
+    
+    SECTION("37.5 ExecuteSyncNumber") {
+        auto num = engine.ExecuteSyncNumber("100 + 23");
+        REQUIRE(num.has_value());
+        CHECK(*num == 123);
+        
+        // Returns nullopt on error
+        auto err = engine.ExecuteSyncNumber("throw 'err'");
+        CHECK_FALSE(err.has_value());
+    }
+    
+    SECTION("37.6 ExecuteSyncString") {
+        auto str = engine.ExecuteSyncString("'hello' + ' world'");
+        REQUIRE(str.has_value());
+        CHECK(*str == "hello world");
+    }
+    
+    SECTION("37.7 ExecuteSyncBool") {
+        auto t = engine.ExecuteSyncBool("5 > 3");
+        auto f = engine.ExecuteSyncBool("5 < 3");
+        
+        REQUIRE(t.has_value());
+        REQUIRE(f.has_value());
+        CHECK(*t == true);
+        CHECK(*f == false);
+    }
+    
+    SECTION("37.8 ExecuteAsync") {
+        auto future = engine.ExecuteAsync("41 + 1");
+        
+        // Get result (blocks until complete)
+        auto result = future.get();
+        
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(0) == 42);
+    }
+    
+    SECTION("37.9 Script::Builder pattern") {
+        auto script = Script::Builder()
+            .Code("'built with builder'")
+            .Name("builder-test")
+            .Priority(ScriptPriority::High)
+            .Timeout(5s)
+            .Trusted(true)
+            .Author("test-author")
+            .Build();
+        
+        REQUIRE(script);
+        CHECK(script->GetName() == "builder-test");
+        CHECK(script->GetPriority() == ScriptPriority::High);
+        CHECK(script->GetTimeout() == 5s);
+        CHECK(script->IsTrusted() == true);
+    }
+    
+    SECTION("37.10 ToJsonString") {
+        auto obj = engine.ExecuteSync("({ x: 1, y: 'test', z: [1, 2, 3] })");
+        REQUIRE(obj.IsOk());
+        
+        std::string json = obj.Value().ToJsonString();
+        
+        // Should contain JSON representation
+        CHECK(json.find("\"x\":1") != std::string::npos);
+        CHECK(json.find("\"y\":\"test\"") != std::string::npos);
+        CHECK(json.find("[1,2,3]") != std::string::npos);
+    }
+    
+    SECTION("37.11 ToJsonString primitives") {
+        CHECK(engine.ExecuteSync("42").Value().ToJsonString() == "42");
+        CHECK(engine.ExecuteSync("'hello'").Value().ToJsonString() == "\"hello\"");
+        CHECK(engine.ExecuteSync("true").Value().ToJsonString() == "true");
+        CHECK(engine.ExecuteSync("null").Value().ToJsonString() == "null");
+    }
+    
+    SECTION("37.12 Combined API usage") {
+        // Complex scenario using multiple new features
+        auto res = engine.ExecuteSync(R"(
+            ({ items: [{ id: 1, name: 'one' }, { id: 2, name: 'two' }] })
+        )");
+        REQUIRE(res.IsOk());
+        
+        std::string names;
+        for (auto item : res.Value()["items"]) {
+            auto id = item["id"].As<int>().value_or(0);
+            auto name = item["name"].As<std::string>().value_or("");
+            names += std::to_string(id) + ":" + name + ";";
+        }
+        
+        CHECK(names == "1:one;2:two;");
+    }
+}
+
+//=============================================================================
+// Test 38: Directive Hooks
+//=============================================================================
+
+TEST_CASE("Test 38: Directive Hooks", "[script][directive]") {
+    auto& engine = ScriptEngine::Instance();
+    auto env = engine.GetMainEnvironment();
+    REQUIRE(env);
+    
+    SECTION("38.1 Register and trigger directive") {
+        bool handler_called = false;
+        std::string received_directive;
+        
+        env->RegisterDirective("test", [&](ScriptEnvironment* e, const std::string& directive) {
+            handler_called = true;
+            received_directive = directive;
+        });
+        
+        // Execute script with directive
+        auto result = env->ExecuteSync(R"("use test"; 42)", 2s);
+        
+        CHECK(handler_called);
+        CHECK(received_directive == "test");
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(0) == 42);
+        
+        // Cleanup
+        env->UnregisterDirective("test");
+    }
+    
+    SECTION("38.2 Multiple directives") {
+        int count = 0;
+        
+        env->RegisterDirective("first", [&](auto*, auto&) { count += 1; });
+        env->RegisterDirective("second", [&](auto*, auto&) { count += 10; });
+        
+        auto result = env->ExecuteSync(R"("use first"; "use second"; 1)", 2s);
+        
+        CHECK(count == 11);
+        REQUIRE(result.IsOk());
+        
+        env->UnregisterDirective("first");
+        env->UnregisterDirective("second");
+    }
+    
+    SECTION("38.3 Unregistered directive is ignored") {
+        auto result = env->ExecuteSync(R"("use nonexistent"; 123)", 2s);
+        
+        // Should still execute successfully
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(0) == 123);
+    }
+    
+    SECTION("38.4 Single quotes work too") {
+        bool called = false;
+        
+        env->RegisterDirective("singlequote", [&](auto*, auto&) { called = true; });
+        
+        auto result = env->ExecuteSync("'use singlequote'; 99", 2s);
+        
+        CHECK(called);
+        REQUIRE(result.IsOk());
+        
+        env->UnregisterDirective("singlequote");
+    }
+    
+    SECTION("38.5 Directive only at start of script") {
+        int count = 0;
+        
+        env->RegisterDirective("middle", [&](auto*, auto&) { count++; });
+        
+        // Directive in middle of code should NOT trigger (it's after a statement)
+        auto result = env->ExecuteSync(R"(
+            1 + 1;
+            "use middle";
+            2 + 2
+        )", 2s);
+
+        CHECK(result);
+        CHECK(count == 0);  // Not triggered - not at start
+        // Even if script runs, the directive shouldn't have triggered
+        
+        env->UnregisterDirective("middle");
+    }
+}
+
+//=============================================================================
+// Test 39: Advanced Features (Phase 1-4)
+//=============================================================================
+
+TEST_CASE("Test 39: Advanced Features", "[script][advanced]") {
+    auto& engine = ScriptEngine::Instance();
+    auto env = engine.GetMainEnvironment();
+    REQUIRE(env);
+    
+    SECTION("39.1 ToVector<T> type conversion") {
+        auto res = engine.ExecuteSync("[1, 2, 3, 4, 5]");
+        REQUIRE(res.IsOk());
+        
+        auto vec = res.Value().ToVector<double>();
+        REQUIRE(vec.size() == 5);
+        CHECK(vec[0] == 1);
+        CHECK(vec[4] == 5);
+        
+        // String vector
+        auto strRes = engine.ExecuteSync("['a', 'b', 'c']");
+        REQUIRE(strRes.IsOk());
+        auto strVec = strRes.Value().ToVector<std::string>();
+        REQUIRE(strVec.size() == 3);
+        CHECK(strVec[0] == "a");
+    }
+    
+    SECTION("39.2 Keys() for objects") {
+        auto res = engine.ExecuteSync("({ foo: 1, bar: 2, baz: 3 })");
+        REQUIRE(res.IsOk());
+        
+        auto keys = res.Value().Keys();
+        CHECK(keys.size() == 3);
+        // Keys may be in any order
+        CHECK(std::find(keys.begin(), keys.end(), "foo") != keys.end());
+        CHECK(std::find(keys.begin(), keys.end(), "bar") != keys.end());
+        CHECK(std::find(keys.begin(), keys.end(), "baz") != keys.end());
+    }
+    
+    SECTION("39.3 SetGlobal and GetGlobal") {
+        env->SetGlobal("testNumber", 42.0);
+        env->SetGlobal("testString", "hello");
+        env->SetGlobal("testBool", true);
+        
+        auto numRes = engine.ExecuteSync("testNumber");
+        auto strRes = engine.ExecuteSync("testString");
+        auto boolRes = engine.ExecuteSync("testBool");
+        
+        REQUIRE(numRes.IsOk());
+        REQUIRE(strRes.IsOk());
+        REQUIRE(boolRes.IsOk());
+        
+        CHECK(numRes.ToNumber().value_or(0) == 42);
+        CHECK(strRes.ToString() == "hello");
+        CHECK(boolRes.ToBool().value_or(false) == true);
+    }
+    
+    SECTION("39.4 Compile and run cached script") {
+        auto compiled = env->Compile("40 + 2", "test-compiled");
+        REQUIRE(compiled);
+        CHECK(compiled->GetName() == "test-compiled");
+        CHECK(compiled->IsValid());
+        
+        auto result = compiled->Run();
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(0) == 42);
+        
+        // Can run multiple times
+        auto result2 = compiled->Run();
+        REQUIRE(result2.IsOk());
+        CHECK(result2.ToNumber().value_or(0) == 42);
+    }
+    
+    SECTION("39.5 IsolationLevel and CanAccess") {
+        // Default is Full
+        CHECK(env->GetIsolationLevel() == ScriptEnvironment::IsolationLevel::Full);
+        CHECK(env->CanAccess("fs") == true);
+        CHECK(env->CanAccess("anything") == true);
+        
+        // Restricted blocks fs, net, etc
+        env->SetIsolationLevel(ScriptEnvironment::IsolationLevel::Restricted);
+        CHECK(env->CanAccess("fs") == false);
+        CHECK(env->CanAccess("net") == false);
+        CHECK(env->CanAccess("math") == true);
+        
+        // Minimal allows only basic compute
+        env->SetIsolationLevel(ScriptEnvironment::IsolationLevel::Minimal);
+        CHECK(env->CanAccess("math") == true);
+        CHECK(env->CanAccess("json") == true);
+        CHECK(env->CanAccess("fs") == false);
+        CHECK(env->CanAccess("timers") == false);
+        
+        // Reset to Full
+        env->SetIsolationLevel(ScriptEnvironment::IsolationLevel::Full);
+    }
+    
+    SECTION("39.6 ExecuteSyncAwait with immediate value") {
+        auto result = env->ExecuteSyncAwait("42", 2s);
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(0) == 42);
+    }
+    
+    SECTION("39.7 ExecuteSyncAwait with resolved promise") {
+        auto result = env->ExecuteSyncAwait("Promise.resolve(123)", 2s);
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(0) == 123);
+    }
+    
+    SECTION("39.8 RegisterModule and RequireModule") {
+        env->RegisterModule("myutils", R"(
+            module.exports = {
+                add: function(a, b) { return a + b; },
+                mul: function(a, b) { return a * b; }
+            };
+        )");
+        
+        auto exports = env->RequireModule("myutils");
+        REQUIRE(exports.IsOk());
+        
+        // Test that exports has the functions
+        auto addFn = exports.Value().Get("add");
+        CHECK(addFn.IsFunction());
+        
+        env->UnregisterModule("myutils");
+    }
+    
+    SECTION("39.9 RequireModule not found") {
+        auto result = env->RequireModule("nonexistent");
+        CHECK(result.IsError());
+    }
+    
+    SECTION("39.10 WatchModule and ReloadModule") {
+        bool reloadCalled = false;
+        std::string reloadedName;
+        
+        env->WatchModule("watchtest", [&](const std::string& name) {
+            reloadCalled = true;
+            reloadedName = name;
+        });
+        
+        env->ReloadModule("watchtest");
+        
+        CHECK(reloadCalled);
+        CHECK(reloadedName == "watchtest");
+        
+        env->UnwatchModule("watchtest");
+        
+        // After unwatch, reload shouldn't trigger callback
+        reloadCalled = false;
+        env->ReloadModule("watchtest");
+        CHECK_FALSE(reloadCalled);
+    }
+    
+    SECTION("39.11 CreateArray and CreateObject") {
+        auto arr = ScriptValue::CreateArray(env.get(), 3);
+        CHECK(arr.HasValue());
+        CHECK(arr.IsArray());
+        
+        auto obj = ScriptValue::CreateObject(env.get());
+        CHECK(obj.HasValue());
+        CHECK(obj.IsObject());
+    }
+    
+    SECTION("39.12 GetModule") {
+        env->RegisterModule("gettest", "var x = 42;");
+        
+        auto code = env->GetModule("gettest");
+        CHECK(code == "var x = 42;");
+        
+        auto missing = env->GetModule("missing");
+        CHECK(missing.empty());
+        
+        env->UnregisterModule("gettest");
+    }
+}
+
+//=============================================================================
+// Test 40: Sandbox Context (Multi-Context Sandboxing)
+//=============================================================================
+
+TEST_CASE("Test 40: Sandbox Context", "[script][sandbox]") {
+    auto& engine = ScriptEngine::Instance();
+    auto env = engine.GetMainEnvironment();
+    REQUIRE(env);
+    
+    SECTION("40.1 Create empty sandbox") {
+        auto sandbox = env->CreateSandbox("test-sandbox");
+        REQUIRE(sandbox);
+        CHECK(sandbox->GetName() == "test-sandbox");
+        CHECK(sandbox->IsValid());
+    }
+    
+    SECTION("40.2 Sandbox has isolated globals") {
+        // Set a global in main context
+        env->SetGlobal("mainVar", 999.0);
+        
+        // Create sandbox without that global
+        auto sandbox = env->CreateSandbox();
+        REQUIRE(sandbox);
+        
+        // mainVar should not exist in sandbox
+        auto result = sandbox->Run("typeof mainVar");
+        REQUIRE(result.IsOk());
+        CHECK(result.ToString() == "undefined");
+        
+        // Set sandbox-local global
+        sandbox->SetGlobal("sandboxVar", 42.0);
+        
+        auto result2 = sandbox->Run("sandboxVar");
+        REQUIRE(result2.IsOk());
+        CHECK(result2.ToNumber().value_or(0) == 42);
+    }
+    
+    SECTION("40.3 Contextify - share object from main context") {
+        // Create object in main context
+        auto objResult = engine.ExecuteSync("({ count: 0, inc: function() { this.count++; } })");
+        REQUIRE(objResult.IsOk());
+        
+        // Create sandbox with that object as shared global
+        std::map<std::string, ScriptValue> sandbox_values;
+        sandbox_values["shared"] = objResult.Value();
+        
+        auto sandbox = env->CreateSandbox(sandbox_values, "contextify-test");
+        REQUIRE(sandbox);
+        
+        // Modify in sandbox
+        auto result = sandbox->Run("shared.inc(); shared.count");
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(-1) == 1);
+    }
+    
+    SECTION("40.4 Multiple sandboxes are independent") {
+        auto sandbox1 = env->CreateSandbox("sandbox1");
+        auto sandbox2 = env->CreateSandbox("sandbox2");
+        REQUIRE(sandbox1);
+        REQUIRE(sandbox2);
+        
+        sandbox1->SetGlobal("x", 10.0);
+        sandbox2->SetGlobal("x", 20.0);
+        
+        auto res1 = sandbox1->Run("x");
+        auto res2 = sandbox2->Run("x");
+        
+        REQUIRE(res1.IsOk());
+        REQUIRE(res2.IsOk());
+        CHECK(res1.ToNumber().value_or(0) == 10);
+        CHECK(res2.ToNumber().value_or(0) == 20);
+    }
+    
+    SECTION("40.5 Sandbox SetGlobal/GetGlobal") {
+        auto sandbox = env->CreateSandbox();
+        REQUIRE(sandbox);
+        
+        sandbox->SetGlobal("num", 123.0);
+        sandbox->SetGlobal("str", "hello");
+        sandbox->SetGlobal("flag", true);
+        
+        auto num = sandbox->GetGlobal("num");
+        auto str = sandbox->GetGlobal("str");
+        auto flag = sandbox->GetGlobal("flag");
+        
+        CHECK(num.ToNumber().value_or(0) == 123);
+        CHECK(str.ToString() == "hello");
+        CHECK(flag.ToBool().value_or(false) == true);
+    }
+    
+    SECTION("40.6 Sandbox compile error handling") {
+        auto sandbox = env->CreateSandbox();
+        REQUIRE(sandbox);
+        
+        auto result = sandbox->Run("invalid syntax here {{{");
+        CHECK(result.IsError());
+    }
+    
+    SECTION("40.7 Run same compiled logic in different contexts") {
+        auto sandbox1 = env->CreateSandbox();
+        auto sandbox2 = env->CreateSandbox();
+        REQUIRE(sandbox1);
+        REQUIRE(sandbox2);
+        
+        sandbox1->SetGlobal("multiplier", 2.0);
+        sandbox2->SetGlobal("multiplier", 10.0);
+        
+        std::string code = "10 * multiplier";
+        
+        auto res1 = sandbox1->Run(code);
+        auto res2 = sandbox2->Run(code);
+        
+        REQUIRE(res1.IsOk());
+        REQUIRE(res2.IsOk());
+        CHECK(res1.ToNumber().value_or(0) == 20);
+        CHECK(res2.ToNumber().value_or(0) == 100);
+    }
+}
+
+//=============================================================================
+// Test 41: V8 Compile Callbacks (Bytecode Caching)
+//=============================================================================
+
+TEST_CASE("Test 41: V8 Compile Callbacks", "[script][compile]") {
+    auto& engine = ScriptEngine::Instance();
+    auto env = engine.GetMainEnvironment();
+    REQUIRE(env);
+    
+    SECTION("41.1 Compile and get source") {
+        auto compiled = env->Compile("1 + 2", "test-source");
+        REQUIRE(compiled);
+        CHECK(compiled->GetSource() == "1 + 2");
+    }
+    
+    SECTION("41.2 GetCachedData returns bytecode") {
+        auto compiled = env->Compile("function add(a,b) { return a + b; } add(1,2)", "cache-test");
+        REQUIRE(compiled);
+        
+        auto cache = compiled->GetCachedData();
+        
+        // Cache should contain bytecode
+        CHECK(!cache.empty());
+        CHECK(cache.size() > 100);  // Bytecode should be substantial
+    }
+    
+    SECTION("41.3 FromCachedData restores compiled script") {
+        std::string code = "(function() { var x = 10; return x * 5; })()";
+        
+        // First - compile and cache
+        auto original = env->Compile(code, "original");
+        REQUIRE(original);
+        
+        auto cache = original->GetCachedData();
+        REQUIRE(!cache.empty());
+        
+        // Second - restore from cache
+        auto restored = CompiledScript::FromCachedData(env.get(), cache, code, "restored");
+        REQUIRE(restored);
+        CHECK(restored->GetName() == "restored");
+        CHECK(restored->IsValid());
+        
+        // Should produce same result
+        auto result = restored->Run();
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(0) == 50);
+    }
+    
+    SECTION("41.4 CompileFromCache convenience") {
+        std::string code = "42 * 2";
+        
+        auto original = env->Compile(code, "conv-test");
+        auto cache = original->GetCachedData();
+        
+        auto restored = env->CompileFromCache(cache, code, "conv-restored");
+        REQUIRE(restored);
+        
+        auto result = restored->Run();
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(0) == 84);
+    }
+    
+    SECTION("41.5 WasCacheRejected false for valid cache") {
+        std::string code = "100 + 23";
+        
+        auto original = env->Compile(code);
+        auto cache = original->GetCachedData();
+        
+        auto restored = env->CompileFromCache(cache, code);
+        REQUIRE(restored);
+        CHECK_FALSE(restored->WasCacheRejected());
+    }
+    
+    SECTION("41.6 CompileFunction with parameters") {
+        // Create argument values
+        auto aRes = engine.ExecuteSync("5");
+        auto bRes = engine.ExecuteSync("3");
+        REQUIRE(aRes.IsOk());
+        REQUIRE(bRes.IsOk());
+        
+        std::vector<std::string> params = {"a", "b"};
+        std::vector args = {aRes.Value(), bRes.Value()};
+        
+        auto result = env->CompileFunction("return a + b", params, args);
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(0) == 8);
+    }
+    
+    SECTION("41.7 CompileFunction with no parameters") {
+        std::vector<std::string> params = {};
+        std::vector<ScriptValue> args = {};
+        
+        auto result = env->CompileFunction("return 42", params, args);
+        REQUIRE(result.IsOk());
+        CHECK(result.ToNumber().value_or(0) == 42);
+    }
+    
+    SECTION("41.8 CompileFunction parameter mismatch error") {
+        std::vector<std::string> params = {"a", "b"};
+        std::vector<ScriptValue> args = {};  // Wrong count
+        
+        auto result = env->CompileFunction("return a + b", params, args);
+        CHECK(result.IsError());
+    }
+}
+
+//=============================================================================
+// Test 42: V8 Value Debug Logger
+//=============================================================================
+
+TEST_CASE("Test 42: V8ValueToDebugString", "[script][logger]") {
+    auto& engine = ScriptEngine::Instance();
+    auto env = engine.GetMainEnvironment();
+    REQUIRE(env);
+    
+    SECTION("42.1 Log number value") {
+        auto result = engine.ExecuteSync("42");
+        REQUIRE(result.IsOk());
+        // Verify ToString works on numbers
+        CHECK(result.ToString() == "42");
+    }
+    
+    SECTION("42.2 Log string value") {
+        auto result = engine.ExecuteSync("'test string'");
+        REQUIRE(result.IsOk());
+        CHECK(result.ToString() == "test string");
+    }
+    
+    SECTION("42.3 Log boolean value") {
+        auto result = engine.ExecuteSync("true");
+        REQUIRE(result.IsOk());
+        CHECK(result.ToBool().value_or(false) == true);
+    }
+    
+    SECTION("42.4 Log object value") {
+        auto result = engine.ExecuteSync("({a: 1, b: 2})");
+        REQUIRE(result.IsOk());
+        auto& val = result.Value();
+        CHECK(val.IsObject());
+    }
+    
+    SECTION("42.5 Log array value") {
+        auto result = engine.ExecuteSync("[1, 2, 3]");
+        REQUIRE(result.IsOk());
+        auto& val = result.Value();
+        CHECK(val.IsArray());
+    }
+    
+    SECTION("42.6 Log undefined value") {
+        auto result = engine.ExecuteSync("undefined");
+        REQUIRE(result.IsOk());
+        auto& val = result.Value();
+        CHECK(val.IsUndefined());
+    }
+    
+    SECTION("42.7 Log null value") {
+        auto result = engine.ExecuteSync("null");
+        REQUIRE(result.IsOk());
+        auto& val = result.Value();
+        CHECK(val.IsNull());
+    }
+    
+    SECTION("42.8 Log function value") {
+        auto result = engine.ExecuteSync("(function() { return 42; })");
+        REQUIRE(result.IsOk());
+        auto& val = result.Value();
+        CHECK(val.IsFunction());
+    }
+}
 
 int main(int argc, char* argv[]) {
-    auto& engine = experiments::ScriptEngine::Instance();
-    // Set log level to Warn to keep test output clean, but allow errors
-    engine.SetLogLevel(experiments::LogLevel::Warn);
+    auto& engine = ScriptEngine::Instance();
+    // Set log level to Error to keep test output clean (suppresses warnings)
+    engine.SetLogLevel(LogLevel::Error);
     
     if (!engine.Initialize()) {
         std::cerr << "FATAL: Failed to initialize ScriptEngine" << std::endl;

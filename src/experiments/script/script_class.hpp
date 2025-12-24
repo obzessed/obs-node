@@ -23,7 +23,7 @@
 #include "../core/metrics.hpp"
 #include "../config/permissions.hpp"
 #include "../config/script_context.hpp"
-#include "script_result.hpp"
+#include "script_value.hpp"
 
 namespace experiments {
 
@@ -60,6 +60,9 @@ inline std::string ScriptStateToString(ScriptState state) {
 //=============================================================================
 
 
+class Script;
+using ScriptPtr = std::shared_ptr<Script>;
+
 class Script : public std::enable_shared_from_this<Script> {
 public:
     using CompletionCallback = std::function<void(bool success, const std::string& result, const ScriptError& error)>;
@@ -79,6 +82,37 @@ public:
         std::string source_file;     // Where this script came from
         std::string author;          // Who wrote it
         bool trusted{false};         // Is this a trusted script?
+    };
+    
+    // Fluent builder for Script creation
+    class Builder {
+    public:
+        Builder() = default;
+        
+        Builder& Code(std::string code) { code_ = std::move(code); return *this; }
+        Builder& Name(std::string name) { options_.name = std::move(name); return *this; }
+        Builder& Priority(ScriptPriority priority) { options_.priority = priority; return *this; }
+        Builder& Timeout(std::chrono::milliseconds timeout) { options_.timeout = timeout; return *this; }
+        Builder& Context(ScriptContextPtr ctx) { options_.context = std::move(ctx); return *this; }
+        Builder& Permissions(PermissionSet perms) { options_.permissions = std::move(perms); return *this; }
+        Builder& SourceFile(std::string file) { options_.source_file = std::move(file); return *this; }
+        Builder& Author(std::string author) { options_.author = std::move(author); return *this; }
+        Builder& Trusted(bool trusted = true) { options_.trusted = trusted; return *this; }
+        Builder& OnComplete(CompletionCallback cb) { on_complete_ = std::move(cb); return *this; }
+        Builder& OnConsole(ConsoleCallback cb) { on_console_ = std::move(cb); return *this; }
+        
+        ScriptPtr Build() {
+            auto script = std::make_shared<Script>(std::move(code_), std::move(options_));
+            if (on_complete_) script->OnComplete(std::move(on_complete_));
+            if (on_console_) script->OnConsole(std::move(on_console_));
+            return script;
+        }
+        
+    private:
+        std::string code_;
+        Options options_;
+        CompletionCallback on_complete_;
+        ConsoleCallback on_console_;
     };
 
     explicit Script(std::string code, Options options = {})
@@ -166,12 +200,12 @@ public:
     }
 
     ScriptState GetState() const { return state_.load(std::memory_order_acquire); }
-    std::string GetResult() const { std::shared_lock lock(mutex_); return result_; }
+    std::string GetResultString() const { std::shared_lock lock(mutex_); return result_string_; }
     ScriptError GetError() const { std::shared_lock lock(mutex_); return error_; }
     
     // Get the raw V8 result value (if available)
-    ScriptResult& GetResultValue() { std::shared_lock lock(mutex_); return result_value_; }
-    const ScriptResult& GetResultValue() const { std::shared_lock lock(mutex_); return result_value_; }
+    ScriptValue& GetResultValue() { std::shared_lock lock(mutex_); return result_value_; }
+    const ScriptValue& GetResultValue() const { std::shared_lock lock(mutex_); return result_value_; }
     bool HasResultValue() const { std::shared_lock lock(mutex_); return result_value_.HasValue(); }
 
     ExecutionMetrics GetMetrics() const { std::shared_lock lock(mutex_); return metrics_; }
@@ -192,7 +226,7 @@ public:
         if (IsComplete() && completion_callback_) {
             auto cb = completion_callback_;
             auto success = state_.load() == ScriptState::Completed;
-            auto result = result_;
+            auto result = result_string_;
             auto error = error_;
             lock.unlock();
             cb(success, result, error);
@@ -233,7 +267,7 @@ private:
 
     void Complete(const std::string& result) {
         std::unique_lock lock(mutex_);
-        result_ = result;
+        result_string_ = result;
         metrics_.end_time = std::chrono::steady_clock::now();
         metrics_.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
             metrics_.end_time - metrics_.start_time);
@@ -246,7 +280,7 @@ private:
     }
     
     // Set the raw V8 result value (called by ScriptEnvironment)
-    void SetResultValue(ScriptResult&& value) {
+    void SetResultValue(ScriptValue&& value) {
         std::unique_lock lock(mutex_);
         result_value_ = std::move(value);
     }
@@ -304,8 +338,8 @@ private:
     ScriptContextPtr context_;
 
     std::atomic<ScriptState> state_{ScriptState::Pending};
-    std::string result_;
-    ScriptResult result_value_;  // Raw V8 value wrapper
+    std::string result_string_;
+    ScriptValue result_value_;  // Raw V8 value wrapper
     ScriptError error_;
     ExecutionMetrics metrics_;
     std::atomic<bool> cancel_requested_{false};

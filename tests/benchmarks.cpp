@@ -254,8 +254,8 @@ TEST_CASE("Benchmark: Script Execution", "[benchmark][script]") {
 
 int main(int argc, char* argv[]) {
     auto& engine = experiments::ScriptEngine::Instance();
-    // Set log level to Warn to keep test output clean, but allow errors
-    engine.SetLogLevel(experiments::LogLevel::Warn);
+    // Set log level to Error to keep output clean (suppresses warnings)
+    engine.SetLogLevel(experiments::LogLevel::Error);
     
     if (!engine.Initialize()) {
         std::cerr << "FATAL: Failed to initialize ScriptEngine" << std::endl;

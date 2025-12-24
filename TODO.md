@@ -1,8 +1,21 @@
 - Extension/Plugin System.
-- Multi Script Parallel Runtime.
 - Own libnode for debug/release and static/dynamic builds
 - FIGMA plugin api like JSX ui building for building ui with Qt.
 - Html Canvas like api to draw in the canvas using obs graphics.
 - Impl a ffi module to access non-available binding apis from libobs.
 - Expression support in obs in someway.
 - Use Rhai for expressions?
+- obs-cxx
+
+# Experiments
+- node:vm support (contextify)
+- v8 <> json converters
+- ffi module
+- http(s) and ws(s)
+- differentiate script module vs expression.
+- support multiple type modules.
+  - AMD
+  - CJS
+  - ESM
+- "use obs";
+  - to have make obs object available at the global scope.

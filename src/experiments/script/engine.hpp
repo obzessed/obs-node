@@ -57,8 +57,16 @@ public:
     // Script execution
     ScriptPtr CreateScript(const std::string& code, const Script::Options& options = {});
     ScriptPtr Execute(const std::string& code, const Script::Options& options = {});
-    Result<std::string> ExecuteSync(const std::string& code, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
-    Result<std::string> ExecuteFile(const std::filesystem::path& path, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    ScriptResult ExecuteSync(const std::string& code, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    ScriptResult ExecuteFile(const std::filesystem::path& path, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    
+    // Direct primitive execution (convenience)
+    std::optional<double> ExecuteSyncNumber(const std::string& code, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    std::optional<std::string> ExecuteSyncString(const std::string& code, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    std::optional<bool> ExecuteSyncBool(const std::string& code, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    
+    // Async execution
+    std::future<ScriptResult> ExecuteAsync(const std::string& code, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
 
     // Events
     EventEmitter& Events() { return events_; }

@@ -14,3 +14,4 @@
 #include "script/script_class.hpp"
 #include "script/environment.hpp"
 #include "script/engine.hpp"
+#include "script/sandbox_context.hpp"
