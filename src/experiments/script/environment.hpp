@@ -122,22 +122,22 @@ public:
     
     
     // Accessors
-    EnvironmentId GetId() const { return id_; }
-    std::string GetName() const { std::shared_lock lock(mutex_); return config_.name; }
-    const EnvironmentConfig& GetConfig() const { return config_; }
-    bool IsRunning() const { return running_.load(std::memory_order_acquire); }
-    bool IsInitialized() const { return initialized_.load(std::memory_order_acquire); }
+    EnvironmentId GetId() const;
+    std::string GetName() const;
+    const EnvironmentConfig& GetConfig() const;
+    bool IsRunning() const;
+    bool IsInitialized() const;
     
     // Metrics
     EnvironmentMetrics GetMetrics();
     MemoryMetrics GetMemoryMetrics();
     
     // Context
-    ScriptContextPtr GetContext() { return shared_context_; }
+    ScriptContextPtr GetContext() const;
     
     // Sandboxing
     void SetIsolationLevel(IsolationLevel level);
-    IsolationLevel GetIsolationLevel() const { return isolation_level_.load(); }
+    IsolationLevel GetIsolationLevel() const;
     bool CanAccess(const std::string& capability) const;  // Check if capability is allowed
     
     // Directive hooks (e.g., "use obs"; -> injects obs global)
@@ -165,7 +165,7 @@ public:
                                      const std::string& name = "");
     
     // Internal accessors for sandbox support
-    node::CommonEnvironmentSetup* GetSetup() const { return setup_.get(); }
+    node::CommonEnvironmentSetup* GetSetup() const;
     ValueEntry* GetValueEntry(ValueId id);
     
 private:
@@ -175,41 +175,11 @@ private:
     void Cleanup();
     MemoryMetrics CollectMemoryMetrics();
     
-    EnvironmentId id_;
-    node::MultiIsolatePlatform* platform_;
-    std::vector<std::string> args_;
-    std::vector<std::string> exec_args_;
-    EnvironmentConfig config_;
-    EventEmitter* events_;
+    // PIMPL: All private data moved to Impl struct
     
-    std::unique_ptr<node::CommonEnvironmentSetup> setup_;
-    ScriptContextPtr shared_context_;
-    
-    std::thread thread_;
-    std::atomic<bool> initialized_{false};
-    std::atomic<bool> running_{false};
-    std::atomic<bool> stop_requested_{false};
-    std::atomic<bool> graceful_stop_{true};
-    std::atomic<IsolationLevel> isolation_level_{IsolationLevel::Full};
-    
-    std::priority_queue<ScriptPtr, std::vector<ScriptPtr>, ScriptPriorityCompare> script_queue_;
-    mutable std::mutex queue_mutex_;
-    std::condition_variable queue_cv_;
-    
-    ExecutionMetrics exec_metrics_;
-    MemoryMetrics cached_memory_metrics_;  // Updated by env thread
-    mutable std::shared_mutex mutex_;
-    
-    // Directive hooks storage
-    std::unordered_map<std::string, DirectiveHandler> directives_;
-    mutable std::mutex directive_mutex_;
+    // Directive parsing (internal)
     std::vector<std::string> ParseDirectives(const std::string& code);
     void ProcessDirectives(const std::string& code);
-    
-    // Module registry
-    std::unordered_map<std::string, std::string> modules_;  // name -> code
-    std::unordered_map<std::string, ReloadCallback> module_watchers_;
-    mutable std::mutex module_mutex_;
     
     //=========================================================================
     // Value Registry - stores persistent V8 values by ID
@@ -295,25 +265,13 @@ public:
     ValueId ToValueId(bool v) { return CreateBool(v); }
     ValueId ToValueId(const std::string& v) { return CreateString(v); }
     ValueId ToValueId(const char* v) { return CreateString(v); }
-    
 private:
-    std::unordered_map<ValueId, ValueEntry> value_registry_;
-    std::atomic<ValueId> next_value_id_{1};
-    mutable std::mutex value_mutex_;
+    // PIMPL idiom to hide implementation details
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
     
-    // Helper: run operation on env thread
-    template<typename F>
-    auto RunOnEnvThread(F&& func) -> decltype(func());
-
-    // Internal storage for bound native functions
-    struct NativeFunctionData {
-        ScriptEnvironment* env;
-        NativeCallback callback;
-    };
-    std::list<NativeFunctionData> native_functions_;
-    mutable std::mutex native_functions_mutex_;
-    
-    // Static V8 callback router
+    // Internal helper for static callback
+    struct NativeFunctionData;
     static void BindCallbackRouter(const v8::FunctionCallbackInfo<v8::Value>& info);
 };
 

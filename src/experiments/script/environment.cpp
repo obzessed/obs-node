@@ -101,6 +101,60 @@ private:
 
 } // namespace
 
+// Internal storage for bound native functions
+struct ScriptEnvironment::NativeFunctionData {
+    ScriptEnvironment* env;
+    NativeCallback callback;
+};
+
+// PIMPL Implementation
+struct ScriptEnvironment::Impl {
+    EnvironmentId id_;
+    node::MultiIsolatePlatform* platform_;
+    std::vector<std::string> args_;
+    std::vector<std::string> exec_args_;
+    EnvironmentConfig config_;
+    EventEmitter* events_;
+    
+    std::unique_ptr<node::CommonEnvironmentSetup> setup_;
+    ScriptContextPtr shared_context_;
+    
+    std::thread thread_;
+    std::atomic<bool> initialized_{false};
+    std::atomic<bool> running_{false};
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> graceful_stop_{true};
+    std::atomic<IsolationLevel> isolation_level_{IsolationLevel::Full};
+    
+    std::priority_queue<ScriptPtr, std::vector<ScriptPtr>, ScriptPriorityCompare> script_queue_;
+    mutable std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+    
+    ExecutionMetrics exec_metrics_;
+    MemoryMetrics cached_memory_metrics_;
+    mutable std::shared_mutex mutex_;
+    
+    std::unordered_map<std::string, DirectiveHandler> directives_;
+    mutable std::mutex directive_mutex_;
+    
+    std::unordered_map<std::string, std::string> modules_;
+    std::unordered_map<std::string, ReloadCallback> module_watchers_;
+    mutable std::mutex module_mutex_;
+    
+    std::unordered_map<ValueId, ValueEntry> value_registry_;
+    std::atomic<ValueId> next_value_id_{1};
+    mutable std::mutex value_mutex_;
+    
+    std::list<NativeFunctionData> native_functions_;
+    mutable std::mutex native_functions_mutex_;
+
+    Impl(EnvironmentId id, node::MultiIsolatePlatform* platform,
+         std::vector<std::string> args, std::vector<std::string> exec_args,
+         EnvironmentConfig config, EventEmitter* events)
+        : id_(id), platform_(platform), args_(std::move(args)), exec_args_(std::move(exec_args)),
+          config_(std::move(config)), events_(events) {}
+};
+
 //=============================================================================
 // ScriptEnvironment Implementation
 //=============================================================================
@@ -112,82 +166,95 @@ ScriptEnvironment::ScriptEnvironment(
     std::vector<std::string> exec_args,
     EnvironmentConfig config,
     EventEmitter* events
-) : id_(id)
-  , platform_(platform)
-  , args_(std::move(args))
-  , exec_args_(std::move(exec_args))
-  , config_(std::move(config))
-  , events_(events)
-  , shared_context_(std::make_shared<ScriptContext>()) {}
+) : impl_(std::make_unique<Impl>(id, platform, std::move(args), std::move(exec_args), std::move(config), events)) {
+    // Shared context initialization
+    impl_->shared_context_ = std::make_shared<ScriptContext>();
+}
 
 ScriptEnvironment::~ScriptEnvironment() {
     Stop(false);
 }
 
 bool ScriptEnvironment::Initialize() {
-    if (initialized_.load()) return true;
+    if (impl_->initialized_.load()) return true;
     
-    LOG_DEBUG("Environment", "Initializing " + config_.name);
+    LOG_DEBUG("Environment", "Initializing " + impl_->config_.name);
     
     std::vector<std::string> errors;
     
-    setup_ = node::CommonEnvironmentSetup::Create(
-        platform_,
+    impl_->setup_ = node::CommonEnvironmentSetup::Create(
+        impl_->platform_,
         &errors,
-        args_,
-        exec_args_,
+        impl_->args_,
+        impl_->exec_args_,
         node::EnvironmentFlags::kOwnsProcessState
     );
     
-    if (!setup_) {
+    if (!impl_->setup_) {
         for (const auto& err : errors) {
-            LOG_ERROR("Environment", config_.name + " creation failed: " + err);
+            LOG_ERROR("Environment", impl_->config_.name + " creation failed: " + err);
         }
         return false;
     }
     
     // Set memory limits if specified
-    if (config_.max_heap_size_mb > 0) {
-        v8::Isolate* isolate = setup_->isolate();
+    if (impl_->config_.max_heap_size_mb > 0) {
+        v8::Isolate* isolate = impl_->setup_->isolate();
         v8::Locker locker(isolate);
         // Note: ResourceConstraints should be set before isolate creation
         // For existing isolate, we can use SetRAILMode or similar
     }
     
-    initialized_.store(true, std::memory_order_release);
-    if (events_) events_->EmitEnvironment(EnvironmentEvent::Created, id_);
-    LOG_INFO("Environment", config_.name + " initialized");
+    impl_->initialized_.store(true, std::memory_order_release);
+    if (impl_->events_) impl_->events_->EmitEnvironment(EnvironmentEvent::Created, impl_->id_);
+    LOG_INFO("Environment", impl_->config_.name + " initialized");
     return true;
 }
 
 bool ScriptEnvironment::Start() {
-    if (!initialized_.load() || running_.load()) return false;
+    if (!impl_->initialized_.load()) {
+        if (!Initialize()) return false;
+    }
     
-    running_.store(true, std::memory_order_release);
-    thread_ = std::thread(&ScriptEnvironment::ThreadMain, this);
+    if (impl_->running_.exchange(true, std::memory_order_acq_rel)) {
+        return true; // Already running
+    }
     
-    if (events_) events_->EmitEnvironment(EnvironmentEvent::Started, id_);
+    impl_->stop_requested_.store(false, std::memory_order_release);
+    impl_->graceful_stop_.store(true, std::memory_order_release);
+    
+    impl_->thread_ = std::thread(&ScriptEnvironment::ThreadMain, this);
+    
+    if (impl_->events_) impl_->events_->EmitEnvironment(EnvironmentEvent::Started, impl_->id_);
     return true;
 }
 
 void ScriptEnvironment::Stop(bool graceful, std::chrono::milliseconds timeout) {
-    if (!running_.load()) return;
+    if (!impl_->running_.load(std::memory_order_acquire)) {
+        if (impl_->thread_.joinable()) impl_->thread_.join();
+        return;
+    }
     
-    LOG_INFO("Environment", config_.name + " stopping (graceful=" + (graceful ? "true" : "false") + ")");
+    LOG_INFO("Environment", impl_->config_.name + " stopping (graceful=" + (graceful ? "true" : "false") + ")");
     
-    if (events_) events_->EmitEnvironment(EnvironmentEvent::Stopping, id_);
+    if (impl_->events_) impl_->events_->EmitEnvironment(EnvironmentEvent::Stopping, impl_->id_);
     
-    graceful_stop_.store(graceful, std::memory_order_release);
-    stop_requested_.store(true, std::memory_order_release);
-    queue_cv_.notify_all();
+    impl_->graceful_stop_.store(graceful, std::memory_order_release);
+    impl_->stop_requested_.store(true, std::memory_order_release);
     
-    if (thread_.joinable()) {
+    // Wake up thread if sleeping
+    {
+        std::lock_guard<std::mutex> lock(impl_->queue_mutex_);
+        impl_->queue_cv_.notify_all();
+    }
+    
+    if (impl_->thread_.joinable()) {
         if (graceful && timeout.count() > 0) {
             // Use a flag to track if join completed
             std::atomic<bool> joined{false};
             std::thread waiter([this, &joined]() {
-                if (thread_.joinable()) {
-                    thread_.join();
+                if (impl_->thread_.joinable()) {
+                    impl_->thread_.join();
                 }
                 joined.store(true, std::memory_order_release);
             });
@@ -196,10 +263,10 @@ void ScriptEnvironment::Stop(bool graceful, std::chrono::milliseconds timeout) {
             auto start = std::chrono::steady_clock::now();
             while (!joined.load(std::memory_order_acquire)) {
                 if (std::chrono::steady_clock::now() - start > timeout) {
-                    LOG_WARN("Environment", config_.name + " graceful shutdown timed out");
+                    LOG_WARN("Environment", impl_->config_.name + " graceful shutdown timed out");
                     // Force stop by terminating execution
-                    if (setup_ && setup_->isolate()) {
-                        setup_->isolate()->TerminateExecution();
+                    if (impl_->setup_ && impl_->setup_->isolate()) {
+                        impl_->setup_->isolate()->TerminateExecution();
                     }
                     break;
                 }
@@ -212,29 +279,29 @@ void ScriptEnvironment::Stop(bool graceful, std::chrono::milliseconds timeout) {
             }
         } else {
             // Direct join without timeout
-            thread_.join();
+            impl_->thread_.join();
         }
     }
     
     Cleanup();
-    running_.store(false, std::memory_order_release);
+    impl_->running_.store(false, std::memory_order_release);
     
-    if (events_) events_->EmitEnvironment(EnvironmentEvent::Stopped, id_);
+    if (impl_->events_) impl_->events_->EmitEnvironment(EnvironmentEvent::Stopped, impl_->id_);
 }
 
 bool ScriptEnvironment::Execute(const ScriptPtr& script) {
-    if (!running_.load() || !script) return false;
+    if (!impl_->running_.load() || !script) return false;
     
     {
-        std::lock_guard lock(queue_mutex_);
-        script_queue_.push(script);
+        std::lock_guard lock(impl_->queue_mutex_);
+        impl_->script_queue_.push(script);
     }
     // Don't notify immediately - let scripts batch up in the priority queue
     // The environment thread will pick them up on its 10ms timer cycle
     // This allows priority ordering to work correctly when multiple scripts
     // are queued in quick succession
     
-    if (events_) events_->EmitScript(ScriptEvent::Queued, script->GetName());
+    if (impl_->events_) impl_->events_->EmitScript(ScriptEvent::Queued, script->GetName());
     return true;
 }
 
@@ -280,7 +347,7 @@ ScriptResult ScriptEnvironment::ExecuteSync(const std::string& code, std::chrono
 }
 
 ScriptResult ScriptEnvironment::ExecuteFile(const std::filesystem::path& path, std::chrono::milliseconds timeout) {
-    if (!config_.allow_file_access) {
+    if (!impl_->config_.allow_file_access) {
         return ScriptResult::Err(ErrorCode::InvalidArgument, "File access not allowed");
     }
     
@@ -347,23 +414,25 @@ ScriptResult ScriptEnvironment::ExecuteSyncAwait(const std::string& code, std::c
     
     // It's a Promise-like object - we need to resolve it
     // Use V8's microtask queue to resolve promises
-    if (!setup_) {
+    // It's a Promise-like object - we need to resolve it
+    // Use V8's microtask queue to resolve promises
+    if (!impl_->setup_) {
         return ScriptResult::Err(ErrorCode::InternalError, "Environment not initialized");
     }
     
-    v8::Isolate* isolate = setup_->isolate();
+    v8::Isolate* isolate = impl_->setup_->isolate();
     v8::Locker locker(isolate);
     v8::Isolate::Scope isolate_scope(isolate);
     v8::HandleScope handle_scope(isolate);
-    v8::Local<v8::Context> context = setup_->context();
+    v8::Local<v8::Context> context = impl_->setup_->context();
     v8::Context::Scope context_scope(context);
     
     // Get the promise value
     v8::Local<v8::Value> promise_val;
     {
-        std::lock_guard<std::mutex> lock(value_mutex_);
-        auto it = value_registry_.find(value.GetValueId());
-        if (it == value_registry_.end()) {
+        std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+        auto it = impl_->value_registry_.find(value.GetValueId());
+        if (it == impl_->value_registry_.end()) {
             return ScriptResult::Err(ErrorCode::InternalError, "Promise value not found");
         }
         
@@ -418,15 +487,15 @@ ScriptResult ScriptEnvironment::ExecuteSyncAwait(const std::string& code, std::c
 }
 
 CompiledScriptPtr ScriptEnvironment::Compile(const std::string& code, const std::string& name) {
-    if (!setup_ || !initialized_.load()) {
+    if (!impl_->setup_ || !impl_->initialized_.load()) {
         return nullptr;
     }
     
-    v8::Isolate* isolate = setup_->isolate();
+    v8::Isolate* isolate = impl_->setup_->isolate();
     v8::Locker locker(isolate);
     v8::Isolate::Scope isolate_scope(isolate);
     v8::HandleScope handle_scope(isolate);
-    v8::Local<v8::Context> context = setup_->context();
+    v8::Local<v8::Context> context = impl_->setup_->context();
     v8::Context::Scope context_scope(context);
     
     v8::TryCatch try_catch(isolate);
@@ -453,15 +522,15 @@ CompiledScriptPtr ScriptEnvironment::Compile(const std::string& code, const std:
 }
 
 ScriptResult ScriptEnvironment::RunCompiledScript(CompiledScriptPtr script, std::chrono::milliseconds timeout) {
-    if (!script || !script->IsValid() || !setup_ || !initialized_.load()) {
+    if (!script || !script->IsValid() || !impl_->setup_ || !impl_->initialized_.load()) {
         return ScriptResult::Err(ErrorCode::InvalidArgument, "Invalid compiled script");
     }
     
-    v8::Isolate* isolate = setup_->isolate();
+    v8::Isolate* isolate = impl_->setup_->isolate();
     v8::Locker locker(isolate);
     v8::Isolate::Scope isolate_scope(isolate);
     v8::HandleScope handle_scope(isolate);
-    v8::Local<v8::Context> context = setup_->context();
+    v8::Local<v8::Context> context = impl_->setup_->context();
     v8::Context::Scope context_scope(context);
     
     v8::TryCatch try_catch(isolate);
@@ -508,7 +577,7 @@ CompiledScriptPtr ScriptEnvironment::CompileFromCache(const std::vector<uint8_t>
 ScriptResult ScriptEnvironment::CompileFunction(const std::string& code, 
                                                  const std::vector<std::string>& param_names,
                                                  const std::vector<ScriptValue>& args) {
-    if (!setup_ || !initialized_.load()) {
+    if (!impl_->setup_ || !impl_->initialized_.load()) {
         return ScriptResult::Err(ErrorCode::NotInitialized, "Environment not initialized");
     }
     
@@ -516,11 +585,11 @@ ScriptResult ScriptEnvironment::CompileFunction(const std::string& code,
         return ScriptResult::Err(ErrorCode::InvalidArgument, "Parameter count mismatch");
     }
     
-    v8::Isolate* isolate = setup_->isolate();
+    v8::Isolate* isolate = impl_->setup_->isolate();
     v8::Locker locker(isolate);
     v8::Isolate::Scope isolate_scope(isolate);
     v8::HandleScope handle_scope(isolate);
-    v8::Local<v8::Context> context = setup_->context();
+    v8::Local<v8::Context> context = impl_->setup_->context();
     v8::Context::Scope context_scope(context);
     
     v8::TryCatch try_catch(isolate);
@@ -567,14 +636,14 @@ ScriptResult ScriptEnvironment::CompileFunction(const std::string& code,
     v8_args.reserve(args.size());
     
     {
-        std::lock_guard<std::mutex> lock(value_mutex_);
+        std::lock_guard<std::mutex> lock(impl_->value_mutex_);
         for (const auto& arg : args) {
             if (!arg.HasValue()) {
                 v8_args.push_back(v8::Undefined(isolate));
                 continue;
             }
-            auto it = value_registry_.find(arg.GetValueId());
-            if (it == value_registry_.end()) {
+            auto it = impl_->value_registry_.find(arg.GetValueId());
+            if (it == impl_->value_registry_.end()) {
                 v8_args.push_back(v8::Undefined(isolate));
                 continue;
             }
@@ -621,11 +690,11 @@ ScriptResult ScriptEnvironment::CompileFunction(const std::string& code,
 //=============================================================================
 
 void ScriptEnvironment::SetIsolationLevel(IsolationLevel level) {
-    isolation_level_.store(level, std::memory_order_release);
+    impl_->isolation_level_.store(level, std::memory_order_release);
 }
 
 bool ScriptEnvironment::CanAccess(const std::string& capability) const {
-    auto level = isolation_level_.load(std::memory_order_acquire);
+    auto level = impl_->isolation_level_.load(std::memory_order_acquire);
     
     // Full access allows everything
     if (level == IsolationLevel::Full) {
@@ -657,8 +726,8 @@ bool ScriptEnvironment::CanAccess(const std::string& capability) const {
 //=============================================================================
 
 void ScriptEnvironment::RegisterModule(const std::string& name, const std::string& code) {
-    std::lock_guard<std::mutex> lock(module_mutex_);
-    modules_[name] = code;
+    std::lock_guard<std::mutex> lock(impl_->module_mutex_);
+    impl_->modules_[name] = code;
 }
 
 void ScriptEnvironment::RegisterModule(const std::string& name, const char* code) {
@@ -672,27 +741,27 @@ void ScriptEnvironment::RegisterModule(const std::string& name, const std::files
     std::stringstream buffer;
     buffer << ifs.rdbuf();
     
-    std::lock_guard<std::mutex> lock(module_mutex_);
-    modules_[name] = buffer.str();
+    std::lock_guard<std::mutex> lock(impl_->module_mutex_);
+    impl_->modules_[name] = buffer.str();
 }
 
 void ScriptEnvironment::UnregisterModule(const std::string& name) {
-    std::lock_guard<std::mutex> lock(module_mutex_);
-    modules_.erase(name);
+    std::lock_guard<std::mutex> lock(impl_->module_mutex_);
+    impl_->modules_.erase(name);
 }
 
 std::string ScriptEnvironment::GetModule(const std::string& name) const {
-    std::lock_guard<std::mutex> lock(module_mutex_);
-    auto it = modules_.find(name);
-    return it != modules_.end() ? it->second : "";
+    std::lock_guard<std::mutex> lock(impl_->module_mutex_);
+    auto it = impl_->modules_.find(name);
+    return it != impl_->modules_.end() ? it->second : "";
 }
 
 ScriptResult ScriptEnvironment::RequireModule(const std::string& name) {
     std::string code;
     {
-        std::lock_guard<std::mutex> lock(module_mutex_);
-        auto it = modules_.find(name);
-        if (it == modules_.end()) {
+        std::lock_guard<std::mutex> lock(impl_->module_mutex_);
+        auto it = impl_->modules_.find(name);
+        if (it == impl_->modules_.end()) {
             return ScriptResult::Err(ErrorCode::ModuleNotFound, "Module not found: " + name);
         }
         code = it->second;
@@ -712,21 +781,21 @@ ScriptResult ScriptEnvironment::RequireModule(const std::string& name) {
 }
 
 void ScriptEnvironment::WatchModule(const std::string& name, ReloadCallback callback) {
-    std::lock_guard<std::mutex> lock(module_mutex_);
-    module_watchers_[name] = std::move(callback);
+    std::lock_guard<std::mutex> lock(impl_->module_mutex_);
+    impl_->module_watchers_[name] = std::move(callback);
 }
 
 void ScriptEnvironment::UnwatchModule(const std::string& name) {
-    std::lock_guard<std::mutex> lock(module_mutex_);
-    module_watchers_.erase(name);
+    std::lock_guard<std::mutex> lock(impl_->module_mutex_);
+    impl_->module_watchers_.erase(name);
 }
 
 void ScriptEnvironment::ReloadModule(const std::string& name) {
     ReloadCallback callback;
     {
-        std::lock_guard<std::mutex> lock(module_mutex_);
-        auto it = module_watchers_.find(name);
-        if (it == module_watchers_.end()) return;
+        std::lock_guard<std::mutex> lock(impl_->module_mutex_);
+        auto it = impl_->module_watchers_.find(name);
+        if (it == impl_->module_watchers_.end()) return;
         callback = it->second;
     }
     
@@ -741,13 +810,13 @@ void ScriptEnvironment::ReloadModule(const std::string& name) {
 //=============================================================================
 
 void ScriptEnvironment::RegisterDirective(const std::string& name, DirectiveHandler handler) {
-    std::lock_guard<std::mutex> lock(directive_mutex_);
-    directives_[name] = std::move(handler);
+    std::lock_guard<std::mutex> lock(impl_->directive_mutex_);
+    impl_->directives_[name] = std::move(handler);
 }
 
 void ScriptEnvironment::UnregisterDirective(const std::string& name) {
-    std::lock_guard<std::mutex> lock(directive_mutex_);
-    directives_.erase(name);
+    std::lock_guard<std::mutex> lock(impl_->directive_mutex_);
+    impl_->directives_.erase(name);
 }
 
 std::vector<std::string> ScriptEnvironment::ParseDirectives(const std::string& code) {
@@ -805,10 +874,10 @@ std::vector<std::string> ScriptEnvironment::ParseDirectives(const std::string& c
 void ScriptEnvironment::ProcessDirectives(const std::string& code) {
     auto directives_found = ParseDirectives(code);
     
-    std::lock_guard<std::mutex> lock(directive_mutex_);
+    std::lock_guard<std::mutex> lock(impl_->directive_mutex_);
     for (const auto& name : directives_found) {
-        auto it = directives_.find(name);
-        if (it != directives_.end()) {
+        auto it = impl_->directives_.find(name);
+        if (it != impl_->directives_.end()) {
             it->second(this, name);
         }
     }
@@ -819,30 +888,30 @@ EnvironmentMetrics ScriptEnvironment::GetMetrics() {
     metrics.memory = GetMemoryMetrics();
     
     {
-        std::shared_lock lock(mutex_);
-        metrics.execution = exec_metrics_;
+        std::shared_lock lock(impl_->mutex_);
+        metrics.execution = impl_->exec_metrics_;
     }
     
     {
-        std::lock_guard lock(queue_mutex_);
-        metrics.queue_size = script_queue_.size();
+        std::lock_guard lock(impl_->queue_mutex_);
+        metrics.queue_size = impl_->script_queue_.size();
     }
     
-    metrics.is_running = running_.load();
+    metrics.is_running = impl_->running_.load();
     return metrics;
 }
 
 MemoryMetrics ScriptEnvironment::GetMemoryMetrics() {
     // Return cached metrics - updated periodically by the environment thread
     // Cannot access isolate from another thread without deadlock
-    std::shared_lock lock(mutex_);
-    return cached_memory_metrics_;
+    std::shared_lock lock(impl_->mutex_);
+    return impl_->cached_memory_metrics_;
 }
 
 MemoryMetrics ScriptEnvironment::CollectMemoryMetrics() {
     MemoryMetrics metrics;
     
-    v8::Isolate* isolate = setup_->isolate();
+    v8::Isolate* isolate = impl_->setup_->isolate();
     v8::Locker locker(isolate);
     v8::Isolate::Scope isolate_scope(isolate);
     
@@ -858,15 +927,15 @@ MemoryMetrics ScriptEnvironment::CollectMemoryMetrics() {
 }
 
 void ScriptEnvironment::ThreadMain() {
-    v8::Isolate* isolate = setup_->isolate();
-    node::Environment* env = setup_->env();
-    uv_loop_t* loop = setup_->event_loop();
+    v8::Isolate* isolate = impl_->setup_->isolate();
+    node::Environment* env = impl_->setup_->env();
+    uv_loop_t* loop = impl_->setup_->event_loop();
     
     {
         v8::Locker locker(isolate);
         v8::Isolate::Scope isolate_scope(isolate);
         v8::HandleScope handle_scope(isolate);
-        v8::Context::Scope context_scope(setup_->context());
+        v8::Context::Scope context_scope(impl_->setup_->context());
         
         // Bootstrap
         std::string bootstrap = 
@@ -874,16 +943,16 @@ void ScriptEnvironment::ThreadMain() {
             "globalThis.require = publicRequire;";
         
         // Add custom bootstrap
-        if (!config_.bootstrap_script.empty()) {
-            bootstrap += config_.bootstrap_script;
+        if (!impl_->config_.bootstrap_script.empty()) {
+            bootstrap += impl_->config_.bootstrap_script;
         }
         
         // Add module paths
-        if (!config_.module_paths.empty()) {
+        if (!impl_->config_.module_paths.empty()) {
             bootstrap += "module.paths = [";
-            for (size_t i = 0; i < config_.module_paths.size(); ++i) {
+            for (size_t i = 0; i < impl_->config_.module_paths.size(); ++i) {
                 if (i > 0) bootstrap += ",";
-                bootstrap += "'" + config_.module_paths[i] + "'";
+                bootstrap += "'" + impl_->config_.module_paths[i] + "'";
             }
             bootstrap += ", ...module.paths];";
         }
@@ -894,22 +963,22 @@ void ScriptEnvironment::ThreadMain() {
         {
             v8::HeapStatistics stats;
             isolate->GetHeapStatistics(&stats);
-            std::unique_lock lock(mutex_);
-            cached_memory_metrics_.heap_size_limit = stats.heap_size_limit();
-            cached_memory_metrics_.total_heap_size = stats.total_heap_size();
-            cached_memory_metrics_.used_heap_size = stats.used_heap_size();
-            cached_memory_metrics_.external_memory = stats.external_memory();
+            std::unique_lock lock(impl_->mutex_);
+            impl_->cached_memory_metrics_.heap_size_limit = stats.heap_size_limit();
+            impl_->cached_memory_metrics_.total_heap_size = stats.total_heap_size();
+            impl_->cached_memory_metrics_.used_heap_size = stats.used_heap_size();
+            impl_->cached_memory_metrics_.external_memory = stats.external_memory();
         }
         
-        LOG_INFO("Environment", config_.name + " thread started");
+        LOG_INFO("Environment", impl_->config_.name + " thread started");
         
         // Main loop
         int loop_count = 0;
-        while (!stop_requested_.load(std::memory_order_acquire)) {
+        while (!impl_->stop_requested_.load(std::memory_order_acquire)) {
             ProcessScriptQueue();
             
             uv_run(loop, UV_RUN_NOWAIT);
-            platform_->DrainTasks(isolate);
+            impl_->platform_->DrainTasks(isolate);
             isolate->PerformMicrotaskCheckpoint();
             
             // Update cached memory metrics periodically (every ~100ms)
@@ -918,11 +987,11 @@ void ScriptEnvironment::ThreadMain() {
                 v8::HeapStatistics stats;
                 isolate->GetHeapStatistics(&stats);
                 {
-                    std::unique_lock lock(mutex_);
-                    cached_memory_metrics_.heap_size_limit = stats.heap_size_limit();
-                    cached_memory_metrics_.total_heap_size = stats.total_heap_size();
-                    cached_memory_metrics_.used_heap_size = stats.used_heap_size();
-                    cached_memory_metrics_.external_memory = stats.external_memory();
+                    std::unique_lock lock(impl_->mutex_);
+                    impl_->cached_memory_metrics_.heap_size_limit = stats.heap_size_limit();
+                    impl_->cached_memory_metrics_.total_heap_size = stats.total_heap_size();
+                    impl_->cached_memory_metrics_.used_heap_size = stats.used_heap_size();
+                    impl_->cached_memory_metrics_.external_memory = stats.external_memory();
                 }
             }
             
@@ -930,28 +999,28 @@ void ScriptEnvironment::ThreadMain() {
             // This allows other threads (e.g. ScriptResult::IsNumber) to access the isolate.
             {
                 v8::Unlocker unlocker(isolate);  // Releases the Locker temporarily
-                std::unique_lock lock(queue_mutex_);
-                queue_cv_.wait_for(lock, std::chrono::milliseconds(10), [this] {
-                    return !script_queue_.empty() || stop_requested_.load();
+                std::unique_lock lock(impl_->queue_mutex_);
+                impl_->queue_cv_.wait_for(lock, std::chrono::milliseconds(10), [this] {
+                    return !impl_->script_queue_.empty() || impl_->stop_requested_.load();
                 });
             }  // Re-acquires the Locker when Unlocker goes out of scope
         }
         
         // Graceful: process remaining scripts
-        if (graceful_stop_.load()) {
-            LOG_DEBUG("Environment", config_.name + " processing remaining scripts");
+        if (impl_->graceful_stop_.load()) {
+            LOG_DEBUG("Environment", impl_->config_.name + " processing remaining scripts");
             ProcessScriptQueue();
         } else {
             // Cancel remaining scripts
-            std::lock_guard lock(queue_mutex_);
-            while (!script_queue_.empty()) {
-                auto script = script_queue_.top();
-                script_queue_.pop();
+            std::lock_guard lock(impl_->queue_mutex_);
+            while (!impl_->script_queue_.empty()) {
+                auto script = impl_->script_queue_.top();
+                impl_->script_queue_.pop();
                 script->Fail(ScriptError::Make(ErrorCode::Cancelled, "Environment shut down"));
             }
         }
         
-        LOG_INFO("Environment", config_.name + " thread stopping");
+        LOG_INFO("Environment", impl_->config_.name + " thread stopping");
     }
 }
 
@@ -959,15 +1028,15 @@ void ScriptEnvironment::ProcessScriptQueue() {
     std::vector<ScriptPtr> scripts_to_run;
     
     {
-        std::lock_guard lock(queue_mutex_);
-        while (!script_queue_.empty()) {
-            scripts_to_run.push_back(script_queue_.top());
-            script_queue_.pop();
+        std::lock_guard lock(impl_->queue_mutex_);
+        while (!impl_->script_queue_.empty()) {
+            scripts_to_run.push_back(impl_->script_queue_.top());
+            impl_->script_queue_.pop();
         }
     }
     
     for (const auto& script : scripts_to_run) {
-        if (stop_requested_.load() && !graceful_stop_.load()) {
+        if (impl_->stop_requested_.load() && !impl_->graceful_stop_.load()) {
             script->Fail(ScriptError::Make(ErrorCode::Cancelled, "Environment shut down"));
             continue;
         }
@@ -980,21 +1049,21 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
     
     if (script->IsCancelRequested()) {
         script->Fail(ScriptError::Make(ErrorCode::Cancelled, "Script cancelled"));
-        if (events_) events_->EmitScript(ScriptEvent::Cancelled, script->GetName());
+        if (impl_->events_) impl_->events_->EmitScript(ScriptEvent::Cancelled, script->GetName());
         return;
     }
     
     script->Start();
-    if (events_) events_->EmitScript(ScriptEvent::Started, script->GetName());
+    if (impl_->events_) impl_->events_->EmitScript(ScriptEvent::Started, script->GetName());
     
-    v8::Isolate* isolate = setup_->isolate();
+    v8::Isolate* isolate = impl_->setup_->isolate();
     v8::HandleScope handle_scope(isolate);
-    v8::Context::Scope context_scope(setup_->context());
+    v8::Context::Scope context_scope(impl_->setup_->context());
     v8::TryCatch try_catch(isolate);
     
     // Setup timeout if specified
     auto timeout = script->GetTimeout();
-    if (timeout.count() == 0) timeout = config_.default_script_timeout;
+    if (timeout.count() == 0) timeout = impl_->config_.default_script_timeout;
     
     std::atomic timed_out{false};
     std::atomic script_done{false};
@@ -1044,7 +1113,7 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
     }
     
     v8::Local<v8::Script> compiled; // Compile it as v8::Script
-    if (!v8::Script::Compile(setup_->context(), source).ToLocal(&compiled)) {
+    if (!v8::Script::Compile(impl_->setup_->context(), source).ToLocal(&compiled)) {
         ScriptError error{ErrorCode::CompileError, "Compile error"};
         if (try_catch.HasCaught()) {
             v8::String::Utf8Value msg(isolate, try_catch.Exception());
@@ -1052,7 +1121,7 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
             
             v8::Local<v8::Message> message = try_catch.Message();
             if (!message.IsEmpty()) {
-                error.line = message->GetLineNumber(setup_->context()).FromMaybe(0);
+                error.line = message->GetLineNumber(impl_->setup_->context()).FromMaybe(0);
                 error.column = message->GetStartColumn();
             }
         }
@@ -1063,7 +1132,7 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
     
     // Run
     v8::Local<v8::Value> result; // Return Value of the script as v8::Value
-    bool success = compiled->Run(setup_->context()).ToLocal(&result);
+    bool success = compiled->Run(impl_->setup_->context()).ToLocal(&result);
     
     // Check if we timed out BEFORE signaling the timeout thread
     // (TerminateExecution causes Run to return, timed_out should already be set)
@@ -1074,11 +1143,11 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
     
     if (was_timed_out && !success) {
         {
-            std::unique_lock lock(mutex_);
-            exec_metrics_.scripts_timed_out++;
+            std::unique_lock lock(impl_->mutex_);
+            impl_->exec_metrics_.scripts_timed_out++;
         }
         script->Fail(ScriptError::Make(ErrorCode::Timeout, "Script execution timed out"));
-        if (events_) events_->EmitScript(ScriptEvent::Timeout, script->GetName());
+        if (impl_->events_) impl_->events_->EmitScript(ScriptEvent::Timeout, script->GetName());
         isolate->CancelTerminateExecution();
         return;
     }
@@ -1090,17 +1159,17 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
             error.message = *msg ? *msg : "Runtime error";
             
             v8::Local<v8::Value> stack_trace;
-            if (try_catch.StackTrace(setup_->context()).ToLocal(&stack_trace)) {
+            if (try_catch.StackTrace(impl_->setup_->context()).ToLocal(&stack_trace)) {
                 v8::String::Utf8Value stack(isolate, stack_trace);
                 if (*stack) error.stack = *stack;
             }
         }
         {
-            std::unique_lock lock(mutex_);
-            exec_metrics_.scripts_failed++;
+            std::unique_lock lock(impl_->mutex_);
+            impl_->exec_metrics_.scripts_failed++;
         }
         script->Fail(error);
-        if (events_) events_->EmitScript(ScriptEvent::Failed, script->GetName());
+        if (impl_->events_) impl_->events_->EmitScript(ScriptEvent::Failed, script->GetName());
         return;
     }
     
@@ -1118,19 +1187,19 @@ void ScriptEnvironment::RunScript(const ScriptPtr& script) {
     script->SetResultValue(std::move(result_value));
     
     {
-        std::unique_lock lock(mutex_);
-        exec_metrics_.scripts_executed++;
+        std::unique_lock lock(impl_->mutex_);
+        impl_->exec_metrics_.scripts_executed++;
     }
     script->Complete(result_str);
-    if (events_) events_->EmitScript(ScriptEvent::Completed, script->GetName());
+    if (impl_->events_) impl_->events_->EmitScript(ScriptEvent::Completed, script->GetName());
 }
 
 void ScriptEnvironment::Cleanup() {
-    if (!setup_) return;
+    if (!impl_->setup_) return;
     
-    v8::Isolate* isolate = setup_->isolate();
-    node::Environment* env = setup_->env();
-    uv_loop_t* loop = setup_->event_loop();
+    v8::Isolate* isolate = impl_->setup_->isolate();
+    node::Environment* env = impl_->setup_->env();
+    uv_loop_t* loop = impl_->setup_->event_loop();
     
     {
         v8::Locker locker(isolate);
@@ -1141,13 +1210,13 @@ void ScriptEnvironment::Cleanup() {
         
         while (uv_loop_alive(loop)) {
             uv_run(loop, UV_RUN_ONCE);
-            platform_->DrainTasks(isolate);
+            impl_->platform_->DrainTasks(isolate);
         }
     }
     
-    setup_.reset();
-    initialized_.store(false, std::memory_order_release);
-    LOG_INFO("Environment", config_.name + " destroyed");
+    impl_->setup_.reset();
+    impl_->initialized_.store(false, std::memory_order_release);
+    LOG_INFO("Environment", impl_->config_.name + " destroyed");
 }
 
 //=============================================================================
@@ -1155,18 +1224,18 @@ void ScriptEnvironment::Cleanup() {
 //=============================================================================
 
 ScriptEnvironment::ValueId ScriptEnvironment::RegisterValue(void* v8_local_ptr) {
-    if (!setup_ || !v8_local_ptr) return INVALID_VALUE_ID;
+    if (!impl_->setup_ || !v8_local_ptr) return INVALID_VALUE_ID;
     
-    v8::Isolate* isolate = setup_->isolate();
+    v8::Isolate* isolate = impl_->setup_->isolate();
     v8::Local<v8::Value>* local = static_cast<v8::Local<v8::Value>*>(v8_local_ptr);
     
     // Create persistent handle
     auto* global = new v8::Global<v8::Value>(isolate, *local);
     
-    ValueId id = next_value_id_.fetch_add(1, std::memory_order_relaxed);
+    ValueId id = impl_->next_value_id_.fetch_add(1, std::memory_order_relaxed);
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    value_registry_[id] = { global, 1 };
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    impl_->value_registry_[id] = { global, 1 };
     
     return id;
 }
@@ -1174,43 +1243,43 @@ ScriptEnvironment::ValueId ScriptEnvironment::RegisterValue(void* v8_local_ptr) 
 void ScriptEnvironment::ReleaseValue(ValueId id) {
     if (id == INVALID_VALUE_ID) return;
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(id);
-    if (it == value_registry_.end()) return;
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(id);
+    if (it == impl_->value_registry_.end()) return;
     
     if (--it->second.refcount == 0) {
         auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
         delete global;
-        value_registry_.erase(it);
+        impl_->value_registry_.erase(it);
     }
 }
 
 void ScriptEnvironment::AddValueRef(ValueId id) {
     if (id == INVALID_VALUE_ID) return;
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(id);
-    if (it != value_registry_.end()) {
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(id);
+    if (it != impl_->value_registry_.end()) {
         ++it->second.refcount;
     }
 }
 
 bool ScriptEnvironment::HasValue(ValueId id) const {
     if (id == INVALID_VALUE_ID) return false;
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    return value_registry_.find(id) != value_registry_.end();
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    return impl_->value_registry_.find(id) != impl_->value_registry_.end();
 }
 
 ScriptEnvironment::ValueType ScriptEnvironment::GetValueType(ValueId id) {
-    if (!HasValue(id) || !setup_) return ValueType::Unknown;
+    if (!HasValue(id) || !impl_->setup_) return ValueType::Unknown;
     
     V8Scope scope(this);
     if (!scope) return ValueType::Unknown;
     v8::Isolate* isolate = scope.GetIsolate();
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(id);
-    if (it == value_registry_.end()) return ValueType::Unknown;
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(id);
+    if (it == impl_->value_registry_.end()) return ValueType::Unknown;
     
     auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
     v8::Local<v8::Value> val = global->Get(isolate);
@@ -1227,16 +1296,16 @@ ScriptEnvironment::ValueType ScriptEnvironment::GetValueType(ValueId id) {
 }
 
 std::string ScriptEnvironment::ValueToString(ValueId id) {
-    if (!HasValue(id) || !setup_) return "";
+    if (!HasValue(id) || !impl_->setup_) return "";
     
     V8Scope scope(this);
     if (!scope) return "";
     v8::Isolate* isolate = scope.GetIsolate();
     v8::Local<v8::Context> context = scope.GetContext();
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(id);
-    if (it == value_registry_.end()) return "";
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(id);
+    if (it == impl_->value_registry_.end()) return "";
     
     auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
     v8::Local<v8::Value> val = global->Get(isolate);
@@ -1249,16 +1318,16 @@ std::string ScriptEnvironment::ValueToString(ValueId id) {
 }
 
 std::optional<double> ScriptEnvironment::ValueToNumber(ValueId id) {
-    if (!HasValue(id) || !setup_) return std::nullopt;
+    if (!HasValue(id) || !impl_->setup_) return std::nullopt;
     
     V8Scope scope(this);
     if (!scope) return std::nullopt;
     v8::Isolate* isolate = scope.GetIsolate();
     v8::Local<v8::Context> context = scope.GetContext();
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(id);
-    if (it == value_registry_.end()) return std::nullopt;
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(id);
+    if (it == impl_->value_registry_.end()) return std::nullopt;
     
     auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
     v8::Local<v8::Value> val = global->Get(isolate);
@@ -1268,15 +1337,15 @@ std::optional<double> ScriptEnvironment::ValueToNumber(ValueId id) {
 }
 
 std::optional<bool> ScriptEnvironment::ValueToBool(ValueId id) {
-    if (!HasValue(id) || !setup_) return std::nullopt;
+    if (!HasValue(id) || !impl_->setup_) return std::nullopt;
     
     V8Scope scope(this);
     if (!scope) return std::nullopt;
     v8::Isolate* isolate = scope.GetIsolate();
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(id);
-    if (it == value_registry_.end()) return std::nullopt;
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(id);
+    if (it == impl_->value_registry_.end()) return std::nullopt;
     
     auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
     v8::Local<v8::Value> val = global->Get(isolate);
@@ -1285,16 +1354,16 @@ std::optional<bool> ScriptEnvironment::ValueToBool(ValueId id) {
 }
 
 std::optional<int64_t> ScriptEnvironment::ValueToInt64(ValueId id) {
-    if (!HasValue(id) || !setup_) return std::nullopt;
+    if (!HasValue(id) || !impl_->setup_) return std::nullopt;
     
     V8Scope scope(this);
     if (!scope) return std::nullopt;
     v8::Isolate* isolate = scope.GetIsolate();
     v8::Local<v8::Context> context = scope.GetContext();
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(id);
-    if (it == value_registry_.end()) return std::nullopt;
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(id);
+    if (it == impl_->value_registry_.end()) return std::nullopt;
     
     auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
     v8::Local<v8::Value> val = global->Get(isolate);
@@ -1304,16 +1373,16 @@ std::optional<int64_t> ScriptEnvironment::ValueToInt64(ValueId id) {
 }
 
 std::string ScriptEnvironment::ValueToJson(ValueId id) {
-    if (!HasValue(id) || !setup_) return "null";
+    if (!HasValue(id) || !impl_->setup_) return "null";
     
     V8Scope scope(this);
     if (!scope) return "null";
     v8::Isolate* isolate = scope.GetIsolate();
     v8::Local<v8::Context> context = scope.GetContext();
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(id);
-    if (it == value_registry_.end()) return "null";
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(id);
+    if (it == impl_->value_registry_.end()) return "null";
     
     auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
     v8::Local<v8::Value> val = global->Get(isolate);
@@ -1329,7 +1398,7 @@ std::string ScriptEnvironment::ValueToJson(ValueId id) {
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::GetProperty(ValueId obj_id, const std::string& key) {
-    if (!HasValue(obj_id) || !setup_) return INVALID_VALUE_ID;
+    if (!HasValue(obj_id) || !impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1338,9 +1407,9 @@ ScriptEnvironment::ValueId ScriptEnvironment::GetProperty(ValueId obj_id, const 
     
     v8::Local<v8::Value> obj_val;
     {
-        std::lock_guard<std::mutex> lock(value_mutex_);
-        auto it = value_registry_.find(obj_id);
-        if (it == value_registry_.end()) return INVALID_VALUE_ID;
+        std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+        auto it = impl_->value_registry_.find(obj_id);
+        if (it == impl_->value_registry_.end()) return INVALID_VALUE_ID;
         auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
         obj_val = global->Get(isolate);
     }
@@ -1358,7 +1427,7 @@ ScriptEnvironment::ValueId ScriptEnvironment::GetProperty(ValueId obj_id, const 
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::GetArrayElement(ValueId arr_id, uint32_t index) {
-    if (!HasValue(arr_id) || !setup_) return INVALID_VALUE_ID;
+    if (!HasValue(arr_id) || !impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1367,9 +1436,9 @@ ScriptEnvironment::ValueId ScriptEnvironment::GetArrayElement(ValueId arr_id, ui
     
     v8::Local<v8::Value> arr_val;
     {
-        std::lock_guard<std::mutex> lock(value_mutex_);
-        auto it = value_registry_.find(arr_id);
-        if (it == value_registry_.end()) return INVALID_VALUE_ID;
+        std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+        auto it = impl_->value_registry_.find(arr_id);
+        if (it == impl_->value_registry_.end()) return INVALID_VALUE_ID;
         auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
         arr_val = global->Get(isolate);
     }
@@ -1385,7 +1454,7 @@ ScriptEnvironment::ValueId ScriptEnvironment::GetArrayElement(ValueId arr_id, ui
 }
 
 bool ScriptEnvironment::SetProperty(ValueId obj_id, const std::string& key, ValueId value_id) {
-    if (!HasValue(obj_id) || !HasValue(value_id) || !setup_) return false;
+    if (!HasValue(obj_id) || !HasValue(value_id) || !impl_->setup_) return false;
     
     V8Scope scope(this);
     if (!scope) return false;
@@ -1394,10 +1463,10 @@ bool ScriptEnvironment::SetProperty(ValueId obj_id, const std::string& key, Valu
     
     v8::Local<v8::Value> obj_val, val;
     {
-        std::lock_guard<std::mutex> lock(value_mutex_);
-        auto obj_it = value_registry_.find(obj_id);
-        auto val_it = value_registry_.find(value_id);
-        if (obj_it == value_registry_.end() || val_it == value_registry_.end()) return false;
+        std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+        auto obj_it = impl_->value_registry_.find(obj_id);
+        auto val_it = impl_->value_registry_.find(value_id);
+        if (obj_it == impl_->value_registry_.end() || val_it == impl_->value_registry_.end()) return false;
         
         obj_val = static_cast<v8::Global<v8::Value>*>(obj_it->second.global_ptr)->Get(isolate);
         val = static_cast<v8::Global<v8::Value>*>(val_it->second.global_ptr)->Get(isolate);
@@ -1411,15 +1480,15 @@ bool ScriptEnvironment::SetProperty(ValueId obj_id, const std::string& key, Valu
 }
 
 std::optional<uint32_t> ScriptEnvironment::GetLength(ValueId id) {
-    if (!HasValue(id) || !setup_) return std::nullopt;
+    if (!HasValue(id) || !impl_->setup_) return std::nullopt;
     
     V8Scope scope(this);
     if (!scope) return std::nullopt;
     v8::Isolate* isolate = scope.GetIsolate();
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(id);
-    if (it == value_registry_.end()) return std::nullopt;
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(id);
+    if (it == impl_->value_registry_.end()) return std::nullopt;
     
     auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
     v8::Local<v8::Value> val = global->Get(isolate);
@@ -1430,7 +1499,7 @@ std::optional<uint32_t> ScriptEnvironment::GetLength(ValueId id) {
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::InvokeFunction(ValueId func_id, const std::vector<ValueId>& args) {
-    if (!HasValue(func_id) || !setup_) return INVALID_VALUE_ID;
+    if (!HasValue(func_id) || !impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1439,9 +1508,9 @@ ScriptEnvironment::ValueId ScriptEnvironment::InvokeFunction(ValueId func_id, co
     
     v8::Local<v8::Value> func_val;
     {
-        std::lock_guard<std::mutex> lock(value_mutex_);
-        auto it = value_registry_.find(func_id);
-        if (it == value_registry_.end()) return INVALID_VALUE_ID;
+        std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+        auto it = impl_->value_registry_.find(func_id);
+        if (it == impl_->value_registry_.end()) return INVALID_VALUE_ID;
         func_val = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr)->Get(isolate);
     }
     
@@ -1451,10 +1520,10 @@ ScriptEnvironment::ValueId ScriptEnvironment::InvokeFunction(ValueId func_id, co
     std::vector<v8::Local<v8::Value>> v8_args;
     v8_args.reserve(args.size());
     {
-        std::lock_guard<std::mutex> lock(value_mutex_);
+        std::lock_guard<std::mutex> lock(impl_->value_mutex_);
         for (ValueId arg_id : args) {
-            auto it = value_registry_.find(arg_id);
-            if (it != value_registry_.end()) {
+            auto it = impl_->value_registry_.find(arg_id);
+            if (it != impl_->value_registry_.end()) {
                 v8_args.push_back(static_cast<v8::Global<v8::Value>*>(it->second.global_ptr)->Get(isolate));
             } else {
                 v8_args.push_back(v8::Undefined(isolate));
@@ -1478,7 +1547,7 @@ ScriptEnvironment::ValueId ScriptEnvironment::InvokeFunction(ValueId func_id, co
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::CallMethod(ValueId obj_id, const std::string& method, const std::vector<ValueId>& args) {
-    if (!HasValue(obj_id) || !setup_) return INVALID_VALUE_ID;
+    if (!HasValue(obj_id) || !impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1488,9 +1557,9 @@ ScriptEnvironment::ValueId ScriptEnvironment::CallMethod(ValueId obj_id, const s
     // Get the object
     v8::Local<v8::Value> obj_val;
     {
-        std::lock_guard<std::mutex> lock(value_mutex_);
-        auto it = value_registry_.find(obj_id);
-        if (it == value_registry_.end()) return INVALID_VALUE_ID;
+        std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+        auto it = impl_->value_registry_.find(obj_id);
+        if (it == impl_->value_registry_.end()) return INVALID_VALUE_ID;
         obj_val = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr)->Get(isolate);
     }
     
@@ -1510,10 +1579,10 @@ ScriptEnvironment::ValueId ScriptEnvironment::CallMethod(ValueId obj_id, const s
     std::vector<v8::Local<v8::Value>> v8_args;
     v8_args.reserve(args.size());
     {
-        std::lock_guard<std::mutex> lock(value_mutex_);
+        std::lock_guard<std::mutex> lock(impl_->value_mutex_);
         for (ValueId arg_id : args) {
-            auto it = value_registry_.find(arg_id);
-            if (it != value_registry_.end()) {
+            auto it = impl_->value_registry_.find(arg_id);
+            if (it != impl_->value_registry_.end()) {
                 v8_args.push_back(static_cast<v8::Global<v8::Value>*>(it->second.global_ptr)->Get(isolate));
             } else {
                 v8_args.push_back(v8::Undefined(isolate));
@@ -1538,7 +1607,7 @@ ScriptEnvironment::ValueId ScriptEnvironment::CallMethod(ValueId obj_id, const s
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::CreateNumber(double value) {
-    if (!setup_) return INVALID_VALUE_ID;
+    if (!impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1549,7 +1618,7 @@ ScriptEnvironment::ValueId ScriptEnvironment::CreateNumber(double value) {
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::CreateString(const std::string& value) {
-    if (!setup_) return INVALID_VALUE_ID;
+    if (!impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1560,7 +1629,7 @@ ScriptEnvironment::ValueId ScriptEnvironment::CreateString(const std::string& va
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::CreateBool(bool value) {
-    if (!setup_) return INVALID_VALUE_ID;
+    if (!impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1571,7 +1640,7 @@ ScriptEnvironment::ValueId ScriptEnvironment::CreateBool(bool value) {
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::CreateUndefined() {
-    if (!setup_) return INVALID_VALUE_ID;
+    if (!impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1582,7 +1651,7 @@ ScriptEnvironment::ValueId ScriptEnvironment::CreateUndefined() {
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::CreateNull() {
-    if (!setup_) return INVALID_VALUE_ID;
+    if (!impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1593,7 +1662,7 @@ ScriptEnvironment::ValueId ScriptEnvironment::CreateNull() {
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::CreateArray(size_t length) {
-    if (!setup_) return INVALID_VALUE_ID;
+    if (!impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1605,7 +1674,7 @@ ScriptEnvironment::ValueId ScriptEnvironment::CreateArray(size_t length) {
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::CreateObject() {
-    if (!setup_) return INVALID_VALUE_ID;
+    if (!impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1618,16 +1687,16 @@ ScriptEnvironment::ValueId ScriptEnvironment::CreateObject() {
 
 std::vector<std::string> ScriptEnvironment::GetObjectKeys(ValueId obj_id) {
     std::vector<std::string> result;
-    if (!HasValue(obj_id) || !setup_) return result;
+    if (!HasValue(obj_id) || !impl_->setup_) return result;
     
     V8Scope scope(this);
     if (!scope) return result;
     v8::Isolate* isolate = scope.GetIsolate();
     v8::Local<v8::Context> context = scope.GetContext();
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(obj_id);
-    if (it == value_registry_.end()) return result;
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(obj_id);
+    if (it == impl_->value_registry_.end()) return result;
     
     auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
     v8::Local<v8::Value> val = global->Get(isolate);
@@ -1650,16 +1719,16 @@ std::vector<std::string> ScriptEnvironment::GetObjectKeys(ValueId obj_id) {
 }
 
 void ScriptEnvironment::SetGlobal(const std::string& name, ValueId value_id) {
-    if (!HasValue(value_id) || !setup_) return;
+    if (!HasValue(value_id) || !impl_->setup_) return;
     
     V8Scope scope(this);
     if (!scope) return;
     v8::Isolate* isolate = scope.GetIsolate();
     v8::Local<v8::Context> context = scope.GetContext();
     
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(value_id);
-    if (it == value_registry_.end()) return;
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(value_id);
+    if (it == impl_->value_registry_.end()) return;
     
     auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
     v8::Local<v8::Value> val = global->Get(isolate);
@@ -1673,7 +1742,7 @@ void ScriptEnvironment::SetGlobal(const std::string& name, ValueId value_id) {
 // SetGlobal overloads removed - replaced by template in header
 
 void ScriptEnvironment::Bind(const std::string& name, NativeCallback callback) {
-    if (!setup_) return;
+    if (!impl_->setup_) return;
     
     V8Scope scope(this);
     if (!scope) return;
@@ -1682,13 +1751,13 @@ void ScriptEnvironment::Bind(const std::string& name, NativeCallback callback) {
     
     // Store callback in our registry to keep it alive
     {
-        std::lock_guard<std::mutex> lock(native_functions_mutex_);
-        native_functions_.push_back({this, std::move(callback)});
+        std::lock_guard<std::mutex> lock(impl_->native_functions_mutex_);
+        impl_->native_functions_.push_back({this, std::move(callback)});
     }
     
     // Create External pointing to the stable address in the list
     // safe because std::list iterators/pointers are stable
-    NativeFunctionData* data_ptr = &native_functions_.back();
+    NativeFunctionData* data_ptr = &impl_->native_functions_.back();
     v8::Local<v8::External> data = v8::External::New(isolate, data_ptr);
     
     // Create FunctionTemplate with the router and data
@@ -1748,9 +1817,9 @@ void ScriptEnvironment::BindCallbackRouter(const v8::FunctionCallbackInfo<v8::Va
     // We can access private members of 'env'.
     
     if (result_val.GetValueId() != INVALID_VALUE_ID) {
-        std::lock_guard<std::mutex> lock(env->value_mutex_);
-        auto it = env->value_registry_.find(result_val.GetValueId());
-        if (it != env->value_registry_.end()) {
+        std::lock_guard<std::mutex> lock(env->impl_->value_mutex_);
+        auto it = env->impl_->value_registry_.find(result_val.GetValueId());
+        if (it != env->impl_->value_registry_.end()) {
             auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
             info.GetReturnValue().Set(global->Get(isolate));
         } else {
@@ -1762,7 +1831,7 @@ void ScriptEnvironment::BindCallbackRouter(const v8::FunctionCallbackInfo<v8::Va
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::GetGlobal(const std::string& name) {
-    if (!setup_) return INVALID_VALUE_ID;
+    if (!impl_->setup_) return INVALID_VALUE_ID;
     
     V8Scope scope(this);
     if (!scope) return INVALID_VALUE_ID;
@@ -1800,11 +1869,44 @@ SandboxContextPtr ScriptEnvironment::CreateSandbox(const std::map<std::string, S
 }
 
 ScriptEnvironment::ValueEntry* ScriptEnvironment::GetValueEntry(ValueId id) {
-    std::lock_guard<std::mutex> lock(value_mutex_);
-    auto it = value_registry_.find(id);
-    if (it == value_registry_.end()) return nullptr;
+    std::lock_guard<std::mutex> lock(impl_->value_mutex_);
+    auto it = impl_->value_registry_.find(id);
+    if (it == impl_->value_registry_.end()) return nullptr;
     return &it->second;
 }
 
-} // namespace experiments
+ScriptEnvironment::EnvironmentId ScriptEnvironment::GetId() const {
+    return impl_->id_;
+}
 
+std::string ScriptEnvironment::GetName() const {
+    std::shared_lock lock(impl_->mutex_);
+    return impl_->config_.name;
+}
+
+const EnvironmentConfig& ScriptEnvironment::GetConfig() const {
+    return impl_->config_;
+}
+
+bool ScriptEnvironment::IsRunning() const {
+    return impl_->running_.load(std::memory_order_acquire);
+}
+
+bool ScriptEnvironment::IsInitialized() const {
+    return impl_->initialized_.load(std::memory_order_acquire);
+}
+
+ScriptEnvironment::IsolationLevel ScriptEnvironment::GetIsolationLevel() const {
+    return impl_->isolation_level_.load();
+}
+
+ScriptContextPtr ScriptEnvironment::GetContext() const
+{
+    return impl_->shared_context_;
+}
+
+node::CommonEnvironmentSetup* ScriptEnvironment::GetSetup() const {
+    return impl_->setup_.get();
+}
+
+} // namespace experiments
