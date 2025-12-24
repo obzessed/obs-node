@@ -3685,6 +3685,89 @@ TEST_CASE("Test 42: V8ValueToDebugString", "[script][logger]") {
     }
 }
 
+//=============================================================================
+// Test 43: Modern API Features
+//=============================================================================
+
+TEST_CASE("Test 43: Modern API", "[script][api]") {
+    auto& engine = ScriptEngine::Instance();
+    auto env = engine.GetMainEnvironment();
+    REQUIRE(env);
+    
+    SECTION("43.1 Variadic Call") {
+        env->ExecuteSync("function add(a, b) { return a + b; }");
+        auto add_func = env->GetGlobal("add");
+        REQUIRE(add_func != ScriptEnvironment::INVALID_VALUE_ID);
+        
+        // Call with variadic arguments
+        auto result_id = env->Call(add_func, 10, 20);
+        auto result = env->ValueToNumber(result_id);
+        CHECK(result.has_value());
+        CHECK(result.value() == 30.0);
+        
+        // Call with mixed types
+        env->ExecuteSync("function concat(a, b) { return a + b; }");
+        auto concat_func = env->GetGlobal("concat");
+        auto res_str_id = env->Call(concat_func, "Value is: ", 42);
+        auto res_str = env->ValueToString(res_str_id);
+        CHECK(res_str == "Value is: 42");
+    }
+    
+    SECTION("43.2 Template SetGlobal") {
+        env->SetGlobal("myInt", 123);
+        env->SetGlobal("myBool", true);
+        env->SetGlobal("myStr", "hello world");
+        
+        auto res = engine.ExecuteSync("myInt + 1");
+        CHECK(res.Value().ToNumber().value_or(0) == 124.0);
+        
+        res = engine.ExecuteSync("myBool");
+        CHECK(res.Value().ToBool().value_or(false) == true);
+        
+        res = engine.ExecuteSync("myStr");
+        CHECK(res.ToString() == "hello world");
+    }
+    
+    SECTION("43.3 Native Function Binding") {
+        // Bind a C++ lambda
+        env->Bind("nativeAdd", [](const std::vector<ScriptValue>& args) -> ScriptValue {
+            double sum = 0;
+            for (const auto& arg : args) {
+                sum += arg.ToNumber().value_or(0);
+            }
+            // Return new number
+            // We need a way to return a value bound to the environment of the args?
+            // Args have env pointer.
+            if (args.empty()) return ScriptValue();
+            
+            // Create result using the environment from the first arg
+            // This assumes all args are from same env (which they are)
+            // But we don't have public access to env->CreateNumber from here efficiently 
+            // without casting 'env' stored in ScriptValue back to ScriptEnvironment.
+            // ScriptValue::GetEnvironment() returns ScriptEnvironment*.
+            auto* env_ptr = args[0].GetEnvironment();
+            if (!env_ptr) return ScriptValue();
+            
+            auto id = env_ptr->CreateNumber(sum);
+            return ScriptValue(env_ptr, id);
+        });
+        
+        auto res = engine.ExecuteSync("nativeAdd(10, 20, 5)");
+        CHECK(res.IsOk());
+        CHECK(res.Value().ToNumber().value_or(0) == 35.0);
+        
+        // Bind void/undefined return
+        env->Bind("nativeLog", [](const std::vector<ScriptValue>& args) -> ScriptValue {
+            // just consume
+            return ScriptValue(); // undefined/invalid
+        });
+        
+        res = engine.ExecuteSync("nativeLog('test')");
+        CHECK(res.IsOk());
+        CHECK(res.Value().IsUndefined());
+    }
+}
+
 int main(int argc, char* argv[]) {
     auto& engine = ScriptEngine::Instance();
     // Set log level to Error to keep test output clean (suppresses warnings)

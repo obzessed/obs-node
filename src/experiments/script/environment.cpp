@@ -1668,7 +1668,11 @@ void ScriptEnvironment::SetGlobal(const std::string& name, ValueId value_id) {
     context->Global()->Set(context, key, val).Check();
 }
 
-void ScriptEnvironment::SetGlobal(const std::string& name, double value) {
+// SetGlobal overloads removed - replaced by template in header
+
+// SetGlobal overloads removed - replaced by template in header
+
+void ScriptEnvironment::Bind(const std::string& name, NativeCallback callback) {
     if (!setup_) return;
     
     V8Scope scope(this);
@@ -1676,39 +1680,85 @@ void ScriptEnvironment::SetGlobal(const std::string& name, double value) {
     v8::Isolate* isolate = scope.GetIsolate();
     v8::Local<v8::Context> context = scope.GetContext();
     
-    v8::Local<v8::String> key = v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked();
-    v8::Local<v8::Number> val = v8::Number::New(isolate, value);
-    context->Global()->Set(context, key, val).Check();
+    // Store callback in our registry to keep it alive
+    {
+        std::lock_guard<std::mutex> lock(native_functions_mutex_);
+        native_functions_.push_back({this, std::move(callback)});
+    }
+    
+    // Create External pointing to the stable address in the list
+    // safe because std::list iterators/pointers are stable
+    NativeFunctionData* data_ptr = &native_functions_.back();
+    v8::Local<v8::External> data = v8::External::New(isolate, data_ptr);
+    
+    // Create FunctionTemplate with the router and data
+    v8::Local<v8::FunctionTemplate> tpl = v8::FunctionTemplate::New(isolate, BindCallbackRouter, data);
+    
+    // Get Function and set on Global object
+    v8::Local<v8::Function> func;
+    if (tpl->GetFunction(context).ToLocal(&func)) {
+        v8::Local<v8::String> key = v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked();
+        context->Global()->Set(context, key, func).Check();
+    }
 }
 
-void ScriptEnvironment::SetGlobal(const std::string& name, const std::string& value) {
-    if (!setup_) return;
+void ScriptEnvironment::BindCallbackRouter(const v8::FunctionCallbackInfo<v8::Value>& info) {
+    v8::Isolate* isolate = info.GetIsolate();
+    v8::HandleScope handle_scope(isolate);
     
-    V8Scope scope(this);
-    if (!scope) return;
-    v8::Isolate* isolate = scope.GetIsolate();
-    v8::Local<v8::Context> context = scope.GetContext();
+    // Retrieve data
+    v8::Local<v8::External> data = info.Data().As<v8::External>();
+    auto* func_data = static_cast<NativeFunctionData*>(data->Value());
+    ScriptEnvironment* env = func_data->env;
     
-    v8::Local<v8::String> key = v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked();
-    v8::Local<v8::String> val = v8::String::NewFromUtf8(isolate, value.c_str()).ToLocalChecked();
-    context->Global()->Set(context, key, val).Check();
-}
-
-void ScriptEnvironment::SetGlobal(const std::string& name, const char* value) {
-    SetGlobal(name, std::string(value));
-}
-
-void ScriptEnvironment::SetGlobal(const std::string& name, bool value) {
-    if (!setup_) return;
+    // Convert arguments to ScriptValue
+    std::vector<ScriptValue> args;
+    args.reserve(info.Length());
     
-    V8Scope scope(this);
-    if (!scope) return;
-    v8::Isolate* isolate = scope.GetIsolate();
-    v8::Local<v8::Context> context = scope.GetContext();
+    for (int i = 0; i < info.Length(); i++) {
+        v8::Local<v8::Value> val = info[i];
+        // Register value to get an ID (thread-safe)
+        ValueId id = env->RegisterValue(&val);
+        // Create ScriptValue (refcounting handled by RegisterValue starting at 1, 
+        // passing to ScriptValue constructor which takes ownership/adds ref? 
+        // Need to check ScriptValue constructor semantics.)
+        
+        // ScriptValue(env, id) constructor does NOT increment refcount by default? 
+        // Let's check. 
+        // If RegisterValue returns ID with refcount 1, and ScriptValue takes it, 
+        // ScriptValue dtor will decrement. So it consumes the initial ref.
+        // Wait, RegisterValue sets refcount=1. 
+        // ScriptValue dtor decrements. 0 -> delete.
+        // So passing ID from RegisterValue to ScriptValue is correct transfer of ownership 
+        // IF ScriptValue doesn't increment on construction. 
+        // Re-read ScriptValue code... 
+        // Actually ScriptValue(env, id) captures the ID. It does NOT increment.
+        // Copy ctor increments.
+        // So this is correct: RegisterValue gives us 1 ref, ScriptValue takes it.
+        args.emplace_back(env, id);
+    }
     
-    v8::Local<v8::String> key = v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked();
-    v8::Local<v8::Boolean> val = v8::Boolean::New(isolate, value);
-    context->Global()->Set(context, key, val).Check();
+    // Call the native callback
+    ScriptValue result_val = func_data->callback(args);
+    
+    // Convert result back to V8
+    // We need to get the underlying V8 value from result_val.
+    // Since ScriptEnvironment doesn't expose "GetValue(id)", we need a friend or helper.
+    // But wait, we are inside ScriptEnvironment static member!
+    // We can access private members of 'env'.
+    
+    if (result_val.GetValueId() != INVALID_VALUE_ID) {
+        std::lock_guard<std::mutex> lock(env->value_mutex_);
+        auto it = env->value_registry_.find(result_val.GetValueId());
+        if (it != env->value_registry_.end()) {
+            auto* global = static_cast<v8::Global<v8::Value>*>(it->second.global_ptr);
+            info.GetReturnValue().Set(global->Get(isolate));
+        } else {
+            info.GetReturnValue().SetUndefined();
+        }
+    } else {
+       info.GetReturnValue().SetUndefined();
+    }
 }
 
 ScriptEnvironment::ValueId ScriptEnvironment::GetGlobal(const std::string& name) {

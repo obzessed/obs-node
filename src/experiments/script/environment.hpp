@@ -43,6 +43,12 @@ namespace node {
     class CommonEnvironmentSetup;
 }
 
+// Forward declarations for V8 types
+namespace v8 {
+    template <class T> class FunctionCallbackInfo;
+    class Value;
+}
+
 namespace experiments {
 
 //=============================================================================
@@ -259,12 +265,36 @@ public:
     std::vector<std::string> GetObjectKeys(ValueId obj_id);
     
     // Global object injection
+    // Variadic Function Calling
+    template<typename... Args>
+    ValueId Call(ValueId func_id, Args&&... args) {
+        std::vector<ValueId> arg_ids = { ToValueId(std::forward<Args>(args))... };
+        return InvokeFunction(func_id, arg_ids);
+    }
+    
+    // Native Function Binding
+    using NativeCallback = std::function<ScriptValue(const std::vector<ScriptValue>&)>;
+    void Bind(const std::string& name, NativeCallback callback);
+
+    // Global object injection (Template)
+    template<typename T>
+    void SetGlobal(const std::string& name, T&& value) {
+        SetGlobal(name, ToValueId(std::forward<T>(value)));
+    }
+    // Base overload for direct ValueId (prevents recursion)
     void SetGlobal(const std::string& name, ValueId value_id);
-    void SetGlobal(const std::string& name, double value);
-    void SetGlobal(const std::string& name, const std::string& value);
-    void SetGlobal(const std::string& name, const char* value);  // Avoid bool ambiguity
-    void SetGlobal(const std::string& name, bool value);
+    
     ValueId GetGlobal(const std::string& name);
+
+    //-------------------------------------------------------------------------
+    // Type conversion helpers (Internal)
+    //-------------------------------------------------------------------------
+    ValueId ToValueId(ValueId v) { return v; }
+    ValueId ToValueId(int v) { return CreateNumber(static_cast<double>(v)); }
+    ValueId ToValueId(double v) { return CreateNumber(v); }
+    ValueId ToValueId(bool v) { return CreateBool(v); }
+    ValueId ToValueId(const std::string& v) { return CreateString(v); }
+    ValueId ToValueId(const char* v) { return CreateString(v); }
     
 private:
     std::unordered_map<ValueId, ValueEntry> value_registry_;
@@ -274,6 +304,17 @@ private:
     // Helper: run operation on env thread
     template<typename F>
     auto RunOnEnvThread(F&& func) -> decltype(func());
+
+    // Internal storage for bound native functions
+    struct NativeFunctionData {
+        ScriptEnvironment* env;
+        NativeCallback callback;
+    };
+    std::list<NativeFunctionData> native_functions_;
+    mutable std::mutex native_functions_mutex_;
+    
+    // Static V8 callback router
+    static void BindCallbackRouter(const v8::FunctionCallbackInfo<v8::Value>& info);
 };
 
 using ScriptEnvironmentPtr = std::shared_ptr<ScriptEnvironment>;
